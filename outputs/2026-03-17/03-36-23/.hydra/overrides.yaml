@@ -1,0 +1,2 @@
+- +swap_role.max_queue_size=20000
+- +ray_kwargs.ray_init.num_gpus=4

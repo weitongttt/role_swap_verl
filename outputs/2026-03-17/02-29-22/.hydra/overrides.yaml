@@ -1,0 +1,7 @@
+- +swap_role.side=A
+- +swap_role.a_trainer_gpus=1
+- +swap_role.a_rollout_gpus=1
+- +swap_role.b_trainer_gpus=0
+- +swap_role.b_rollout_gpus=0
+- async_training.trigger_parameter_sync_step=1
+- async_training.staleness_threshold=0
