@@ -88,14 +88,18 @@ def _send_sync(sock: socket.socket, obj: Any) -> None:
 @dataclass
 class _RunState:
     max_queue_size: int
+    a_to_a: deque
     a_to_b: deque
     b_to_a: deque
+    b_to_b: deque
     cond: asyncio.Condition
     stats: dict[str, int]
     allow_put: dict[str, bool]
     allow_get: dict[str, bool]
     active_put: str
     active_get: str
+    a_pull_turn: str
+    b_pull_turn: str
 
 
 class TcpExchangeServer:
@@ -115,14 +119,18 @@ class TcpExchangeServer:
             cond = asyncio.Condition(lock)
             st = _RunState(
                 max_queue_size=self.default_max_queue_size,
+                a_to_a=deque(maxlen=self.default_max_queue_size),
                 a_to_b=deque(maxlen=self.default_max_queue_size),
                 b_to_a=deque(maxlen=self.default_max_queue_size),
+                b_to_b=deque(maxlen=self.default_max_queue_size),
                 cond=cond,
                 stats=defaultdict(int),
                 allow_put={"A": False, "B": False},
                 allow_get={"A": False, "B": False},
                 active_put="A",
                 active_get="B",
+                a_pull_turn="A",
+                b_pull_turn="B",
             )
             # Initial phase: A_put + B_get
             st.allow_put["A"] = True
@@ -199,18 +207,19 @@ class TcpExchangeServer:
                 if op in ("push_from_A", "push_from_B"):
                     async with st.cond:
                         if op == "push_from_A":
-                            q = st.a_to_b
-                            produced_k, dropped_k = "a_to_b_produced", "a_to_b_dropped"
+                            qs = (st.a_to_a, st.a_to_b)
+                            produced_k, dropped_k = "a_produced", "a_dropped"
                         else:
-                            q = st.b_to_a
-                            produced_k, dropped_k = "b_to_a_produced", "b_to_a_dropped"
+                            qs = (st.b_to_a, st.b_to_b)
+                            produced_k, dropped_k = "b_produced", "b_dropped"
                         dropped = False
-                        if len(q) >= st.max_queue_size:
-                            # deque(maxlen) auto-drop on append, but we count explicitly for clarity
-                            q.popleft()
+                        for q in qs:
+                            if len(q) >= st.max_queue_size:
+                                q.popleft()
+                                dropped = True
+                            q.append(payload)
+                        if dropped:
                             st.stats[dropped_k] += 1
-                            dropped = True
-                        q.append(payload)
                         st.stats[produced_k] += 1
                         st.cond.notify_all()
                     await _send(writer, {"ok": True, "result": (not dropped), "error": None})
@@ -219,15 +228,31 @@ class TcpExchangeServer:
                 if op in ("pull_for_A", "pull_for_B"):
                     async with st.cond:
                         if op == "pull_for_A":
-                            q = st.b_to_a
-                            consumed_k = "b_to_a_consumed"
+                            if st.a_pull_turn == "A":
+                                q = st.a_to_a
+                                next_turn = "B"
+                            else:
+                                q = st.b_to_a
+                                next_turn = "A"
                         else:
-                            q = st.a_to_b
-                            consumed_k = "a_to_b_consumed"
+                            if st.b_pull_turn == "A":
+                                q = st.a_to_b
+                                next_turn = "B"
+                            else:
+                                q = st.b_to_b
+                                next_turn = "A"
+                                
                         while len(q) == 0:
                             await st.cond.wait()
                         item = q.popleft()
-                        st.stats[consumed_k] += 1
+                        
+                        if op == "pull_for_A":
+                            st.a_pull_turn = next_turn
+                            st.stats["a_consumed"] += 1
+                        else:
+                            st.b_pull_turn = next_turn
+                            st.stats["b_consumed"] += 1
+                            
                         await _send(writer, {"ok": True, "result": (item, len(q)), "error": None})
                     continue
 
@@ -302,14 +327,17 @@ class TcpExchangeClient:
             await writer.wait_closed()
 
     async def send_to_peer(self, sample: Any) -> bool:
-        return bool(await self.request_async(self._op_push(), sample))
+        sample_bytes = pickle.dumps(sample, protocol=pickle.HIGHEST_PROTOCOL)
+        return bool(await self.request_async(self._op_push(), sample_bytes))
 
     async def recv_from_peer(self) -> tuple[Any | None, int]:
-        item, qlen = await self.request_async(self._op_pull(), None)
+        item_bytes, qlen = await self.request_async(self._op_pull(), None)
+        item = pickle.loads(item_bytes) if item_bytes is not None else None
         return item, int(qlen)
 
     def recv_from_peer_sync(self) -> tuple[Any | None, int]:
-        item, qlen = self.request_sync(self._op_pull(), None)
+        item_bytes, qlen = self.request_sync(self._op_pull(), None)
+        item = pickle.loads(item_bytes) if item_bytes is not None else None
         return item, int(qlen)
 
     def get_statistics_sync(self) -> dict[str, Any]:

@@ -57,7 +57,7 @@ max_num_batched_tokens=$((max_response_length * 4))
 n_resp_per_prompt=4
 use_dynamic_bsz=true
 total_rollout_steps=$((400*1*160))
-mini_batch_size=160  # 对齐原版 5*32，每次权重更新消耗相同样本量
+mini_batch_size=320  # GAP-GRPO: 消耗 A 和 B 汇总的样本量 (160+160)
 require_batches=1
 test_freq=1000
 
@@ -65,8 +65,8 @@ staleness_threshold=100
 trigger_parameter_sync_step=1
 partial_rollout=false
 
-project_name="role_swap"
-experiment_name="test_0319_stale_B"
+project_name="gap_grpo"
+experiment_name="test_0323_gap_grpo_B"
 
 # 等待 A 写入 exchange.run_id 文件，避免 A/B 用到不同通道
 EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
