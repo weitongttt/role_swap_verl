@@ -101,6 +101,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     actor_rollout_ref.rollout.calculate_log_probs=True \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
+    trainer.save_freq=50 \
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \

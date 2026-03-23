@@ -1,15 +1,23 @@
 #!/bin/bash
 set -x
 export VERL_USE_MODELSCOPE=True
-export HYDRA_CONFIG_PATH="/zhangshihao/weitong/verl_swap/verl/verl/trainer/config"
+export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
+export PYTHONPATH="$(pwd)/verl:$PYTHONPATH"
 export CUDA_VISIBLE_DEVICES=0,1
-export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
+export RAY_ADDRESS="127.0.0.1:6381"
+export SWANLAB_API_KEY="HPA4rMyhiXXBFNbyKiW4A"
+export VLLM_USE_V1=1
+return_raw_chat="True"
 rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-# if [ "$rollout_mode" = "async" ]; then
-#     export VLLM_USE_V1=1
-#     return_raw_chat="True"
-# fi
+
+# 独立启动 baseline 的 Ray 集群 (避开 A/B 的 6379 和 6380 端口)
+RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
+mkdir -p "$RAY_TEMP_DIR_BASE"
+if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6381" >/dev/null 2>&1; then
+  taskset -c 0-29 /zhangshihao/weitong/anaconda3/envs/verl/bin/ray start --head --port=6381 --num-gpus=2 --num-cpus=30 --temp-dir "$RAY_TEMP_DIR_BASE" --include-dashboard=false
+  sleep 3
+fi
 
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
@@ -24,26 +32,26 @@ max_response_length=4096
 max_num_batched_tokens=$((max_response_length * 4))  # max_response_length 的 4-8 倍
 n_resp_per_prompt=4
 use_dynamic_bsz=true  # 动态batch size
-total_rollout_steps=$(((400*5*32)))
-mini_batch_size=32 # 最小推理批次
-require_batches=1 # 一个step几个最小推理批次(一个step进行一次训练)
+total_rollout_steps=$(((400*1*160)))
+mini_batch_size=160 # 为了做到绝对对齐实验，必须和 A 改成一模一样的 160
+require_batches=1
 test_freq=1000
 staleness_threshold=100
-trigger_parameter_sync_step=5
+trigger_parameter_sync_step=1 # 对齐 A 的同步频率
 partial_rollout=false # 中断生成
 
 # 实验名
-project_name="comparision_0205"
-experiment_name="gsm8k_last_test"
+project_name="role_swap_baseline"
+experiment_name="baseline_2gpu_run"
 
 
-PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_main \
+PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.experimental.fully_async_policy.fully_async_main \
     data.train_files=${train_files} \
     data.val_files=${val_files} \
     data.train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=${return_raw_chat} \
-    data.shuffle=False \
+    data.shuffle=True \
     data.max_response_length=${max_response_length} \
     actor_rollout_ref.model.path=${model_path} \
     algorithm.adv_estimator=${adv_estimator} \
@@ -60,6 +68,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ma
     actor_rollout_ref.rollout.calculate_log_probs=True \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
+    trainer.save_freq=50 \
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \

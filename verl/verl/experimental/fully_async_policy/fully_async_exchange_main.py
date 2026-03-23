@@ -75,12 +75,14 @@ class ExchangeAsMessageQueueClient:
         # Trainer uses sync path today, but keep async for compatibility.
         if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
             self.exchange_client.gate_wait_get_sync()
-        return await self.exchange_client.recv_from_peer()
+        res = await self.exchange_client.recv_from_peer()
+        return res[0] if isinstance(res, tuple) else res
 
     def get_sample_sync(self) -> Any | None:
         if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
             self.exchange_client.gate_wait_get_sync()
-        return self.exchange_client.recv_from_peer_sync()
+        res = self.exchange_client.recv_from_peer_sync()
+        return res[0] if isinstance(res, tuple) else res
 
     async def get_queue_size(self) -> int:
         stats = self.get_statistics_sync()
@@ -429,7 +431,7 @@ class FullyAsyncExchangeTaskRunner:
 
         try:
             while futures:
-                done_futures, remaining_futures = ray.wait(futures, num_returns=1, timeout=None)
+                done_futures, remaining_futures = ray.wait(futures, num_returns=len(futures), timeout=None)
                 for future in done_futures:
                     try:
                         ray.get(future)
