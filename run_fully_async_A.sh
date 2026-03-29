@@ -10,7 +10,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
 export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
 export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
-export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
+export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"HPA4rMyhiXXBFNbyKiW4A"}
 # vLLM 这里实际走的是 v1 AsyncLLMEngine；环境变量不一致会直接报错。
 # 统一设为 1（如再遇到 v1 profiling assert，我们再做初始化阶段的隔离/降并发）。
 export VLLM_USE_V1=${VLLM_USE_V1:-1}

@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-rm -f /tmp/verl_model_cache_ready /tmp/verl_exchange_run_id
+
 set -x
 
 # Side B: 启动时先从 train 开始，吃到 A 的 rollout 后再启动自己的 rollout
@@ -10,7 +10,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3}
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6380}
 export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
 export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
-export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
+export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"HPA4rMyhiXXBFNbyKiW4A"}
 # vLLM 这里实际走的是 v1 AsyncLLMEngine；环境变量不一致会直接报错。
 export VLLM_USE_V1=${VLLM_USE_V1:-1}
 # Ray 默认会对重复日志做去重，容易看起来“卡住没输出”
