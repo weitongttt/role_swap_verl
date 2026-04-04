@@ -786,7 +786,11 @@ class RayWorkerGroup(WorkerGroup):
             remote_call = getattr(worker, self.fused_worker_execute_fn_name)
             return remote_call.remote(f"{self.sub_cls_name}_fwmn_{method_name}", *args, **kwargs)
         # fused worker not used
-        remote_call = getattr(worker, method_name)
+        try:
+            remote_call = getattr(worker, method_name)
+        except AttributeError:
+            # WorkerDict colocated actors expose e.g. actor_execute_checkpoint_engine
+            remote_call = getattr(worker, f"actor_{method_name}")
         return remote_call.remote(*args, **kwargs)
 
     def execute_rank_zero_sync(self, method_name: str, *args, **kwargs):

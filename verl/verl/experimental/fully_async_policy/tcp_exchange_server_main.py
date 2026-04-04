@@ -10,8 +10,9 @@ from verl.experimental.fully_async_policy.tcp_exchange import TcpExchangeServer
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=18080)
+    # 默认监听所有接口，便于多机/多容器训练进程连入；仅需本机时传 --host 127.0.0.1
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=28080)
     ap.add_argument("--max-queue-size", type=int, default=20000)
     args = ap.parse_args()
 

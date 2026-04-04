@@ -138,7 +138,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.progress_bar = None
         self.trigger_parameter_sync_step = config.async_training.trigger_parameter_sync_step
         self.last_ckpt_version = 0
-        self.train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
+        self.train_role = (
+            Role.ActorRollout
+            if config.async_training.use_trainer_do_validate
+            or config.async_training.get("colocate_actor_rollout", False)
+            else Role.Actor
+        )
 
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
@@ -246,6 +251,22 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         queue_len = 0
         while len(queue_samples) < self.required_samples:
             # Get a single sample and wait until there is a sample or None is received
+            dbg_raw = os.environ.get("VERL_EXCHANGE_DEBUG", "").strip().lower()
+            dbg_level = 0
+            if dbg_raw in ("true", "yes", "on"):
+                dbg_level = 2
+            else:
+                try:
+                    dbg_level = int(dbg_raw)
+                except ValueError:
+                    dbg_level = 0
+
+            if dbg_level >= 2:
+                print(
+                    f"[FullyAsyncTrainer][EXCHANGE_DEBUG] about to get_sample_sync "
+                    f"have={len(queue_samples)}/{self.required_samples}",
+                    flush=True,
+                )
             sample, queue_len = self.message_queue_client.get_sample_sync()
 
             if sample is None:
@@ -320,6 +341,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.actor_wg = self.all_wg[str(self.train_role)]
         self.actor_wg.init_model()
         self.actor_rollout_wg = self.actor_wg  # to be compatible with the functions that not be modified
+
+    def get_actor_rollout_wg(self):
+        """供同集群 rollouter 走 vLLM init_hybrid 共置（单 Ray GPU，对齐 main_ppo global_pool）。"""
+        if self.actor_rollout_wg is None:
+            raise RuntimeError("get_actor_rollout_wg: call init_workers first")
+        return self.actor_rollout_wg
 
     async def init_workers(self):
         """Initialize distributed training workers using Ray backend.
@@ -494,6 +521,9 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if self.local_trigger_step == 1:
             self.actor_rollout_wg.save_model_to_cpu(1)
             old_log_prob, old_log_prob_mfu = super()._compute_old_log_prob(batch)
+            # MIS 计算结束后确保模型回到 GPU。
+            # 否则可能出现 optimizer state 在 CPU、参数在 CUDA 的 device mismatch。
+            self.actor_rollout_wg.restore_model_from_cpu(1)
         else:
             self.actor_rollout_wg.save_model_to_cpu(self.local_trigger_step)
             self.actor_rollout_wg.restore_model_from_cpu(1)
@@ -520,8 +550,81 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         if self.local_trigger_step != 1:
             return
 
+        def _sync_dbg_enabled() -> bool:
+            raw = os.environ.get("VERL_SYNC_DEBUG", "").strip().lower()
+            if raw in ("", "0", "false", "no", "off"):
+                return False
+            return True
+
+        def _sync_dbg(msg: str) -> None:
+            if not _sync_dbg_enabled():
+                return
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            print(
+                f"[FullyAsyncTrainer][SYNC] {ts} {msg} "
+                f"(param_version={self.current_param_version} local_trigger_step={self.local_trigger_step})",
+                flush=True,
+            )
+
+        def _sync_dbg_every_s() -> float:
+            # Heartbeat interval; keep it low-noise but actionable.
+            raw = os.environ.get("VERL_SYNC_HEARTBEAT_S", "5").strip()
+            try:
+                v = float(raw)
+                return 5.0 if v <= 0 else v
+            except Exception:
+                return 5.0
+
+        def _sync_timeout_s(name: str, default_s: float) -> float:
+            raw = os.environ.get(f"VERL_SYNC_TIMEOUT_{name}_S", str(default_s)).strip()
+            try:
+                v = float(raw)
+                return default_s if v <= 0 else v
+            except Exception:
+                return default_s
+
+        # Param sync 时会触发 rollouter/vLLM 权重接收（尤其 vLLM v1 的 IPC 逻辑）。
+        # main_ppo 的时序是：generate 后 sleep_replicas()，让 KV/cache 释放，避免 update_weights 阶段显存峰值叠加 OOM。
+        # 这里对齐 main_ppo：先 bootstrap_pause（阻止继续生成/清理 in-flight），再 sleep_replicas()，
+        # update_weights 后再 wake_up_replicas() + reset_staleness。
+        try:
+            _sync_dbg("bootstrap_pause START")
+            ref = self.rollouter.bootstrap_pause.remote()
+            deadline = time.time() + _sync_timeout_s("BOOTSTRAP_PAUSE", 120.0)
+            next_hb = time.time() + _sync_dbg_every_s()
+            while True:
+                ready, _ = ray.wait([ref], timeout=1.0)
+                if ready:
+                    ray.get(ready[0])
+                    _sync_dbg("bootstrap_pause DONE")
+                    break
+                if time.time() >= next_hb:
+                    try:
+                        st = ray.get(self.rollouter.get_debug_state.remote())
+                    except Exception as e:
+                        st = {"error": repr(e)}
+                    _sync_dbg(f"bootstrap_pause WAITING rollouter_state={st}")
+                    next_hb = time.time() + _sync_dbg_every_s()
+                if time.time() > deadline:
+                    raise TimeoutError("timeout waiting rollouter.bootstrap_pause")
+        except Exception:
+            # 某些 rollouter 代理可能没有 bootstrap_pause；忽略即可继续走原逻辑。
+            _sync_dbg("bootstrap_pause FAILED/UNSUPPORTED -> ignored")
+            pass
+
+        # 关键：释放 rollout replicas 的 KV/cache，避免 update_weights 阶段 OOM。
+        try:
+            _sync_dbg("sleep_replicas START")
+            await self.checkpoint_manager.sleep_replicas()
+            _sync_dbg("sleep_replicas DONE")
+        except Exception:
+            _sync_dbg("sleep_replicas FAILED -> ignored")
+            pass
+
+        _sync_dbg("update_weights START")
         with marked_timer("timing_s/param_sync", self.timing_raw):
             await self.checkpoint_manager.update_weights(global_steps=self.current_param_version)
+        _sync_dbg("update_weights DONE")
         print(
             f"[FullyAsyncTrainer] _fit_update_weights, "
             f"timing_s/param_sync: {self.timing_raw['timing_s/param_sync']:.4f} seconds "
@@ -529,7 +632,33 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
 
         # Reset staleness in rollouter
-        timing_raw = ray.get(self.rollouter.reset_staleness.remote())
+        _sync_dbg("reset_staleness START")
+        timing_ref = self.rollouter.reset_staleness.remote()
+        deadline = time.time() + _sync_timeout_s("RESET_STALENESS", 300.0)
+        next_hb = time.time() + _sync_dbg_every_s()
+        while True:
+            ready, _ = ray.wait([timing_ref], timeout=1.0)
+            if ready:
+                timing_raw = ray.get(ready[0])
+                _sync_dbg("reset_staleness DONE")
+                break
+            if time.time() >= next_hb:
+                try:
+                    st = ray.get(self.rollouter.get_debug_state.remote())
+                except Exception as e:
+                    st = {"error": repr(e)}
+                _sync_dbg(f"reset_staleness WAITING rollouter_state={st}")
+                next_hb = time.time() + _sync_dbg_every_s()
+            if time.time() > deadline:
+                raise TimeoutError("timeout waiting rollouter.reset_staleness")
+        # 恢复 rollout replicas 的 KV/weights 常驻显存，供下一轮 generation 使用。
+        try:
+            _sync_dbg("wake_up_replicas START")
+            await self.checkpoint_manager.wake_up_replicas()
+            _sync_dbg("wake_up_replicas DONE")
+        except Exception:
+            _sync_dbg("wake_up_replicas FAILED -> ignored")
+            pass
         self.logger.log(
             data=timing_raw,
             step=self.current_param_version,
@@ -769,7 +898,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """
         if hasattr(batch, "meta_info") and batch.meta_info:
             trajectory_param_versions = batch.meta_info["trajectory_param_versions"]
-            stale_traj_count = sum(1 for v in trajectory_param_versions if self.current_param_version - v >= 1)
+            # 某些样本在未触发参数版本打点时会产生 None；统计陈旧轨迹时需要跳过这些值。
+            stale_traj_count = sum(
+                1
+                for v in trajectory_param_versions
+                if v is not None and self.current_param_version - int(v) >= 1
+            )
             self.stale_trajectory_processed += stale_traj_count
             metrics.update(
                 {

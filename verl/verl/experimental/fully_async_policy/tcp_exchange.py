@@ -35,6 +35,7 @@ For pull ops, server blocks until an item is available.
 from __future__ import annotations
 
 import asyncio
+import os
 import pickle
 import socket
 import struct
@@ -83,6 +84,35 @@ def _recv_sync(sock: socket.socket) -> Any:
 
 def _send_sync(sock: socket.socket, obj: Any) -> None:
     sock.sendall(_pack(obj))
+
+
+def _tcp_exchange_debug(msg: str) -> None:
+    dbg_raw = os.environ.get("VERL_EXCHANGE_DEBUG", "").strip().lower()
+    if dbg_raw in ("", "0", "false", "no", "off"):
+        return
+
+    # 调试降噪分级：
+    # - VERL_EXCHANGE_DEBUG=1：只打印「参数更新触发的相位翻转」(on_param_update_sync LEAVE)，避免 pull/push 轮询刷屏
+    # - VERL_EXCHANGE_DEBUG>=2：打印较多门控/拉取结果，但仍过滤 op=stats 和 ENTER 噪声
+    try:
+        dbg_level = int(dbg_raw)
+    except ValueError:
+        dbg_level = 1
+
+    lowered = msg.lower()
+    if dbg_level <= 1:
+        if "on_param_update_sync leave" not in lowered:
+            return
+    else:
+        # 日志压缩：
+        # 1) `op=stats` 会在训练过程中高频被轮询，刷屏极其严重 -> 直接过滤
+        # 2) 大量 `... ENTER ...` 也会造成噪声 -> 只保留 LEAVE/结果类信息
+        if "op=stats" in lowered:
+            return
+        if " enter" in lowered:
+            return
+
+    print(f"[TcpExchange] {msg}", flush=True)
 
 
 @dataclass
@@ -137,7 +167,8 @@ class TcpExchangeServer:
             while True:
                 req = await _recv(reader)
                 op = req.get("op")
-                run_id = str(req.get("run_id", "default"))
+                # 与客户端 TcpExchangeClient.run_id 对齐，避免文件/环境里的首尾空白导致同一物理集群却落到两套 _runs 队列
+                run_id = str(req.get("run_id", "default")).strip()
                 payload = req.get("payload", None)
                 st = await self._get_run(run_id)
 
@@ -154,6 +185,27 @@ class TcpExchangeServer:
                             **dict(st.stats),
                         }
                     await _send(writer, {"ok": True, "result": res, "error": None})
+                    continue
+
+                if op == "reset_run":
+                    # 可重复启动训练时，run_id 可能保持不变；此时必须重置队列/门控状态
+                    # 否则会继承旧 run 留下的 `None` 终止哨兵，导致对端立刻停止收样本。
+                    async with st.cond:
+                        st.a_to_b.clear()
+                        st.b_to_a.clear()
+                        st.stats.clear()
+                        st.active_put = "A"
+                        st.active_get = "B"
+                        st.allow_put["A"] = True
+                        st.allow_put["B"] = False
+                        st.allow_get["A"] = False
+                        st.allow_get["B"] = True
+                        st.stats["phase_resets"] += 1
+                        st.cond.notify_all()
+                    await _send(
+                        writer,
+                        {"ok": True, "result": {"reset_done": True, "active_put": st.active_put, "active_get": st.active_get}},
+                    )
                     continue
 
                 if op == "wait_put":
@@ -217,6 +269,8 @@ class TcpExchangeServer:
                     continue
 
                 if op in ("pull_for_A", "pull_for_B"):
+                    # 禁止在持有 st.cond 时 await _send：大 payload 会长时间占锁，阻塞对侧 push，
+                    # 多连接下易出现极端饥饿甚至表现为「pull 永远等不到数据」（与 push 抢同一把锁）。
                     async with st.cond:
                         if op == "pull_for_A":
                             q = st.b_to_a
@@ -228,7 +282,8 @@ class TcpExchangeServer:
                             await st.cond.wait()
                         item = q.popleft()
                         st.stats[consumed_k] += 1
-                        await _send(writer, {"ok": True, "result": (item, len(q)), "error": None})
+                        qlen_after = len(q)
+                    await _send(writer, {"ok": True, "result": (item, qlen_after), "error": None})
                     continue
 
                 await _send(writer, {"ok": False, "result": None, "error": f"unknown op: {op}"})
@@ -258,7 +313,7 @@ class TcpExchangeClient:
             raise ValueError(f"side must be A/B, got: {side}")
         self.host = host
         self.port = int(port)
-        self.run_id = str(run_id)
+        self.run_id = str(run_id).strip()
         self.side = side
 
     def _op_push(self) -> str:
@@ -278,6 +333,10 @@ class TcpExchangeClient:
         - We still keep a short connect timeout so a dead server fails fast.
         """
         blocking_ops = {"wait_put", "wait_get", "pull_for_A", "pull_for_B"}
+        _tcp_exchange_debug(
+            f"request_sync ENTER side={self.side} run_id={self.run_id} {self.host}:{self.port} op={op} "
+            f"blocking={op in blocking_ops}"
+        )
         connect_timeout = 5 if op in blocking_ops else 30
         with socket.create_connection((self.host, self.port), timeout=connect_timeout) as sock:
             if op in blocking_ops:
@@ -287,7 +346,14 @@ class TcpExchangeClient:
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
                 raise RuntimeError(resp.get("error") or "unknown error")
-            return resp.get("result")
+            result = resp.get("result")
+            if op in ("pull_for_A", "pull_for_B") and isinstance(result, tuple) and len(result) >= 2:
+                _tcp_exchange_debug(
+                    f"request_sync LEAVE op={op} side={self.side} qlen={result[1]} item_is_none={result[0] is None}"
+                )
+            else:
+                _tcp_exchange_debug(f"request_sync LEAVE op={op} side={self.side}")
+            return result
 
     async def request_async(self, op: str, payload: Any | None = None) -> Any:
         reader, writer = await asyncio.open_connection(self.host, self.port)
@@ -312,30 +378,65 @@ class TcpExchangeClient:
         item, qlen = self.request_sync(self._op_pull(), None)
         return item, int(qlen)
 
+    def send_to_peer_sync(self, sample: Any) -> bool:
+        """Synchronous push (avoids asyncio.run in plain sync training loops)."""
+        return bool(self.request_sync(self._op_push(), sample))
+
+    def recv_from_peer_sync_with_timeout(self, timeout_s: float) -> tuple[Any | None, int]:
+        timeout_s = float(timeout_s)
+        with socket.create_connection((self.host, self.port), timeout=5) as sock:
+            _send_sync(sock, {"op": self._op_pull(), "run_id": self.run_id, "payload": None})
+            # pull is server-blocking; timeout lets caller fail fast on deadlock.
+            sock.settimeout(timeout_s)
+            resp = _recv_sync(sock)
+            if not resp.get("ok", False):
+                raise RuntimeError(resp.get("error") or "unknown error")
+            item, qlen = resp.get("result")
+            return item, int(qlen)
+
     def get_statistics_sync(self) -> dict[str, Any]:
         return dict(self.request_sync("stats", None))
 
+    def reset_run_sync(self) -> None:
+        # 同步 reset：清空队列并回到初始相位 (A_put + B_get)。
+        self.request_sync("reset_run", None)
+
     def gate_wait_put_sync(self) -> None:
+        _tcp_exchange_debug(
+            f"gate_wait_put_sync ENTER (blocking until phase allows PUT) "
+            f"side={self.side} run_id={self.run_id} {self.host}:{self.port}"
+        )
         with socket.create_connection((self.host, self.port), timeout=5) as sock:
             sock.settimeout(None)
             _send_sync(sock, {"op": "wait_put", "run_id": self.run_id, "side": self.side})
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
                 raise RuntimeError(resp.get("error") or "unknown error")
+        _tcp_exchange_debug(f"gate_wait_put_sync LEAVE side={self.side} run_id={self.run_id}")
 
     def gate_wait_get_sync(self) -> None:
+        _tcp_exchange_debug(
+            f"gate_wait_get_sync ENTER (blocking until phase allows GET) "
+            f"side={self.side} run_id={self.run_id} {self.host}:{self.port}"
+        )
         with socket.create_connection((self.host, self.port), timeout=5) as sock:
             sock.settimeout(None)
             _send_sync(sock, {"op": "wait_get", "run_id": self.run_id, "side": self.side})
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
                 raise RuntimeError(resp.get("error") or "unknown error")
+        _tcp_exchange_debug(f"gate_wait_get_sync LEAVE side={self.side} run_id={self.run_id}")
 
     def on_param_update_sync(self) -> dict[str, Any]:
+        _tcp_exchange_debug(
+            f"on_param_update_sync ENTER side={self.side} run_id={self.run_id} {self.host}:{self.port}"
+        )
         with socket.create_connection((self.host, self.port), timeout=30) as sock:
             _send_sync(sock, {"op": "on_param_update", "run_id": self.run_id, "side": self.side})
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
                 raise RuntimeError(resp.get("error") or "unknown error")
-            return dict(resp.get("result") or {})
+            out = dict(resp.get("result") or {})
+            _tcp_exchange_debug(f"on_param_update_sync LEAVE side={self.side} result={out}")
+            return out
 

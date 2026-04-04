@@ -1,22 +1,20 @@
 #!/bin/bash
+set -euo pipefail
 set -x
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="/zhangshihao/weitong/verl_swap/verl/verl/trainer/config"
 export CUDA_VISIBLE_DEVICES=0,1
 export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
+export VLLM_USE_V1=1
 rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
-# if [ "$rollout_mode" = "async" ]; then
-#     export VLLM_USE_V1=1
-#     return_raw_chat="True"
-# fi
+return_raw_chat=True
 
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/train.parquet"
 model_path="Qwen/Qwen2.5-0.5B-Instruct"
 
-# 训练参数
 train_prompt_bsz=0
 gen_prompt_bsz=1
 max_model_len=8192  # 模型最大上下文长度
@@ -24,17 +22,17 @@ max_response_length=4096
 max_num_batched_tokens=$((max_response_length * 4))  # max_response_length 的 4-8 倍
 n_resp_per_prompt=4
 use_dynamic_bsz=true  # 动态batch size
-total_rollout_steps=$(((400*5*32)))
-mini_batch_size=32 # 最小推理批次
+total_rollout_steps=$(((400*1*160)))
+mini_batch_size=160 # 最小推理批次
 require_batches=1 # 一个step几个最小推理批次(一个step进行一次训练)
 test_freq=1000
 staleness_threshold=100
-trigger_parameter_sync_step=5
+trigger_parameter_sync_step=1
 partial_rollout=false # 中断生成
 
 # 实验名
-project_name="comparision_0205"
-experiment_name="gsm8k_last_test"
+project_name="role_swap"
+experiment_name="baseline_bs160_4gpus"
 
 
 PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_main \
@@ -75,4 +73,4 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ma
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size} \
+    actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size}

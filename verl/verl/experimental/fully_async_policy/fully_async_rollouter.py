@@ -22,6 +22,7 @@ from pprint import pformat
 import numpy as np
 import ray
 import torch
+from typing import Any, Optional
 
 from verl.experimental.fully_async_policy.detach_utils import (
     RolloutSample,
@@ -234,16 +235,53 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
     def get_total_train_steps(self):
         return self.total_train_steps
 
+    async def get_debug_state(self) -> dict:
+        """Lightweight state for diagnosing hangs from the trainer side."""
+        async with self.lock:
+            active_n = len(self.active_tasks) if self.active_tasks is not None else 0
+            return {
+                "running": bool(getattr(self, "running", False)),
+                "paused": bool(getattr(self, "paused", False)),
+                "_bootstrap_paused": bool(getattr(self, "_bootstrap_paused", False)),
+                "staleness_samples": int(getattr(self, "staleness_samples", 0) or 0),
+                "max_required_samples": int(getattr(self, "max_required_samples", 0) or 0),
+                "active_tasks_size": int(active_n),
+                "max_concurrent_samples": int(getattr(self, "max_concurrent_samples", 0) or 0),
+            }
+
     async def reset_staleness(self):
         """
         Reset staleness samples after parameter update.
         Returns timing_raw dictionary for metrics.
         """
+        # 低噪声定位：只在首次 reset_staleness 时打印关键进度，
+        # 用于判断卡点是在 get_queue_size 还是后续逻辑。
+        if not getattr(self, "_printed_reset_staleness_once", False):
+            print(
+                f"[FullyAsyncRollouter][GATE_DEBUG] reset_staleness BEGIN "
+                f"queue_client={type(self.message_queue_client).__name__}",
+                flush=True,
+            )
+            self._printed_reset_staleness_once = True
+
+        # Avoid holding self.lock while awaiting network/TCP stats; otherwise
+        # reset can block and gate-flip (on_param_update) never happens.
+        queue_size = await self.message_queue_client.get_queue_size()
+
+        if getattr(self, "_printed_reset_staleness_once", False) and not getattr(
+            self, "_printed_reset_staleness_after_queue_once", False
+        ):
+            print("[FullyAsyncRollouter][GATE_DEBUG] reset_staleness AFTER get_queue_size", flush=True)
+            self._printed_reset_staleness_after_queue_once = True
+
         async with self.lock:
+            # bootstrap_pause() 设定的“粘性暂停”在参数同步/reset staleness 时解除。
+            self._bootstrap_paused = False
             self.paused = False
             self.condition.notify_all()
-            # every time param change, reset staleness_samples
-            self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
+            # Every time param changes, reset staleness_samples.
+            self.staleness_samples = len(self.active_tasks) + int(queue_size)
+
             timing_raw = {}
             rollout_active_time = self.idle_start_time - self.step_start_time
             rollout_version_time = time.time() - self.step_start_time
@@ -258,6 +296,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"idle_ratio: {timing_raw['fully_async/rollouter/idle_ratio']:.4f}"
             )
             self.step_start_time = time.time()
+
         return timing_raw
 
     async def bootstrap_pause(self) -> None:
@@ -266,16 +305,32 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         start rollouter actor/process, but keep it from generating until the first
         trainer param sync triggers reset_staleness().
         """
+        # 1) Stop submitting new generation tasks.
         async with self.lock:
+            # 粘性暂停：避免 MonitorLoop 在 exchange_cfg 没开启 pause_on_staleness 时
+            # 把 paused=false，导致 gate/样本流不同步。
+            self._bootstrap_paused = True
             self.paused = True
             if self.max_required_samples is not None:
                 # Force pause condition in _should_pause_generation().
                 self.staleness_samples = int(self.max_required_samples)
             self.condition.notify_all()
-            print(
-                f"[FullyAsyncRollouter][Public][bootstrap_pause] paused={self.paused} "
-                f"staleness_samples={self.staleness_samples} max_required_samples={self.max_required_samples}"
-            )
+            active_n = len(self.active_tasks) if self.active_tasks is not None else 0
+
+        print(
+            f"[FullyAsyncRollouter][Public][bootstrap_pause] paused={self.paused} "
+            f"staleness_samples={self.staleness_samples} max_required_samples={self.max_required_samples} "
+            f"active_tasks_snapshot={active_n}",
+            flush=True,
+        )
+
+        # 2) 不在这里等待 active_tasks 全部结束。
+        # 原因：active_tasks 可能卡在 exchange gate（wait_put/wait_get/pull_*）上，
+        # 只有完成 reset_staleness/on_param_update_sync 后 gate 才会翻转。
+        # 若 bootstrap_pause 继续 await drain，会形成死锁链路：
+        #   bootstrap_pause 等任务结束 -> 任务等 gate 翻转 -> gate 翻转等 reset_staleness
+        # checkpoint_manager.sleep_replicas() 会处理 KV/cache 释放；这里保持“立即返回”即可。
+        return
 
     def do_validate(self) -> ValidateMetrics:
         """Run validation and return metrics"""
@@ -364,16 +419,22 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             raise ValueError("[FullyAsyncRollouter] Missing async_training configuration")
         assert self.config.actor_rollout_ref.rollout.calculate_log_probs, "must rollout calculate log_probs"
 
-    async def init_workers(self):
+    async def init_workers(self, shared_actor_rollout_wg: Optional[Any] = None):
         """Initialize distributed training workers using Ray backend.
 
         Creates:
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
+
+        When ``shared_actor_rollout_wg`` is set (isolated/colocated cluster), vLLM uses
+        ``init_hybrid`` on the trainer's actor workers — one Ray GPU slot, same as main_ppo.
         """
         self._init_async_objects()
         self._create_worker_classes()
         self._init_reward_loop()
+        if shared_actor_rollout_wg is not None:
+            self.rollout_wg = shared_actor_rollout_wg
+            self.actor_rollout_wg = shared_actor_rollout_wg
         await self._init_async_rollout_manager()
 
     def _create_actor_rollout_classes(self):
@@ -459,14 +520,22 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 async with self.lock:
                     self.paused = True
                 while self.active_tasks:
+                    # 关键：不要在持锁状态下 await（asyncio.wait）或 await task，
+                    # 否则容易在 active_tasks 内存在“卡在同步 socket/门控”类任务时形成死锁。
                     async with self.lock:
-                        # After acquiring the lock, the number of active_tasks may change, need to be verified again
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            for task in done_tasks:
-                                await task
+                        tasks_snapshot = set(self.active_tasks)
+                        if not tasks_snapshot:
+                            break
+
+                    done_tasks, _pending = await asyncio.wait(
+                        tasks_snapshot, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done_tasks:
+                        await task
+
+                    # 移除已完成任务，避免下一轮重复等待
+                    async with self.lock:
+                        self.active_tasks -= set(done_tasks)
 
                 async with self.lock:
                     while self.paused:
@@ -484,23 +553,36 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 )
                 while self.active_tasks:
                     async with self.lock:
-                        if self.active_tasks:
-                            done_tasks, self.active_tasks = await asyncio.wait(
-                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            for task in done_tasks:
-                                await task
+                        tasks_snapshot = set(self.active_tasks)
+                        if not tasks_snapshot:
+                            break
+
+                    done_tasks, _pending = await asyncio.wait(
+                        tasks_snapshot, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done_tasks:
+                        await task
+
+                    async with self.lock:
+                        self.active_tasks -= set(done_tasks)
                 break
 
             # Check whether the number of concurrent tasks exceeds the limit
             while len(self.active_tasks) >= self.max_concurrent_samples:
+                # 同样：不要在持锁时 await asyncio.wait/await task，否则 bootstrap_pause/reset_staleness 可能抢不到锁。
                 async with self.lock:
-                    if self.active_tasks:
-                        done_tasks, self.active_tasks = await asyncio.wait(
-                            self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        for task in done_tasks:
-                            await task
+                    tasks_snapshot = set(self.active_tasks)
+                    if not tasks_snapshot:
+                        break
+
+                done_tasks, _pending = await asyncio.wait(
+                    tasks_snapshot, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done_tasks:
+                    await task
+
+                async with self.lock:
+                    self.active_tasks -= set(done_tasks)
 
             # Submit single sample processing
             async with self.lock:
@@ -524,6 +606,23 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         )
         rollout_sample.rollout_status = await self.get_statistics()
 
+        dbg_raw = os.environ.get("VERL_EXCHANGE_DEBUG", "").strip().lower()
+        dbg_level = 0
+        if dbg_raw in ("true", "yes", "on"):
+            dbg_level = 2
+        else:
+            try:
+                dbg_level = int(dbg_raw)
+            except ValueError:
+                dbg_level = 0
+
+        if dbg_level >= 2:
+            ex = getattr(self.config, "exchange", None)
+            s = str(getattr(ex, "side", "?")) if ex is not None else "?"
+            print(
+                f"[FullyAsyncRollouter][EXCHANGE_DEBUG] put_sample id={rollout_sample.sample_id} exchange.side={s}",
+                flush=True,
+            )
         success = await self.message_queue_client.put_sample(
             sample=ray.cloudpickle.dumps(rollout_sample),
         )
@@ -605,8 +704,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # Set the running status flag
         async with self.lock:
-            self.paused = False
             self.running = True
+            # Important: do not override `self.paused` here.
+            # `bootstrap_pause()` may have set paused=True on side-B to prevent
+            # generation until the first param sync/reset_staleness.
 
         # Create the main asynchronous task
         generation_task = safe_create_task(self._streaming_generation_main(), name="generation_task")
@@ -651,7 +752,13 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 last_stats_time = current_time
 
             # Trigger rollout recovery
-            if self.paused and not await self._should_pause_generation():
+            # 若当前是 bootstrap_pause 的粘性暂停，则不允许自动 unpause；
+            # 直到 reset_staleness() 把 _bootstrap_paused 清掉。
+            if (
+                self.paused
+                and not getattr(self, "_bootstrap_paused", False)
+                and not await self._should_pause_generation()
+            ):
                 async with self.lock:
                     self.paused = False
                     print("[FullyAsyncRollouter][ShouldPause] notify all wait tasks.")

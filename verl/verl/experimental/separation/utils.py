@@ -19,7 +19,7 @@ from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 
 
-def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
+def create_resource_pool_manager(config, roles: list, pool_name_prefix: str = "") -> ResourcePoolManager:
     """
     Create resource pool manager
 
@@ -32,6 +32,7 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     """
     resource_pool_spec = {}
     mapping = {}
+    pool_prefix = f"{pool_name_prefix}_" if pool_name_prefix else ""
 
     # Actor/Critic resource pool
     if any(role in roles for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]):
@@ -39,17 +40,22 @@ def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
         assert config.trainer.nnodes > 0, "config.trainer.nnodes must be greater than 0"
 
         trainer_pool = [config.trainer.n_gpus_per_node] * config.trainer.nnodes
-        resource_pool_spec["trainer_pool"] = trainer_pool
+        trainer_pool_name = f"{pool_prefix}trainer_pool"
+        resource_pool_spec[trainer_pool_name] = trainer_pool
 
         # Map training-related roles to the same resource pool
         for role in [Role.Actor, Role.ActorRollout, Role.Critic, Role.RefPolicy, Role.RewardModel]:
             if role in roles:
-                mapping[role] = "trainer_pool"
+                mapping[role] = trainer_pool_name
 
     # Rollout resource pool
     if Role.Rollout in roles:
         assert config.rollout.n_gpus_per_node > 0, "config.rollout.n_gpus_per_node must be greater than 0"
         assert config.rollout.nnodes > 0, "config.rollout.nnodes must be greater than 0"
+        rollout_pool = [config.rollout.n_gpus_per_node] * config.rollout.nnodes
+        rollout_pool_name = f"{pool_prefix}rollout_pool"
+        resource_pool_spec[rollout_pool_name] = rollout_pool
+        mapping[Role.Rollout] = rollout_pool_name
 
     return ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
@@ -77,7 +83,8 @@ def create_role_worker_mapping(config):
     ray_worker_group_cls = RayWorkerGroup
 
     train_role = Role.Actor
-    if config.get("async_training", {}).get("use_trainer_do_validate", False):
+    at = config.get("async_training", {}) or {}
+    if at.get("use_trainer_do_validate", False) or at.get("colocate_actor_rollout", False):
         train_role = Role.ActorRollout
 
     role_worker_mapping = {

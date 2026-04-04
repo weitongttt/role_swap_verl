@@ -28,6 +28,9 @@ async_training:
   # whether to use trainer do_validate
   use_trainer_do_validate: False
 
+  # 单卡共置：DetachActorWorker 使用 actor_rollout 角色，内含 vLLM ServerAdapter，配合 hybrid vLLMHttpServer 与 naive checkpoint 同步
+  colocate_actor_rollout: False
+
 # Rollout config
 rollout:
 

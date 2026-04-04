@@ -186,7 +186,13 @@ def assemble_batch_from_rollout_samples(
 
     param_version_start = final_batch.non_tensor_batch["min_global_steps"]
     param_version_end = final_batch.non_tensor_batch["max_global_steps"]
-    param_version_diff = [abs(a - b) for a, b in zip(param_version_end, param_version_start, strict=False)]
+
+    def _param_span(a, b):
+        if a is None or b is None:
+            return 0
+        return abs(int(a) - int(b))
+
+    param_version_diff = [_param_span(a, b) for a, b in zip(param_version_end, param_version_start, strict=False)]
     num_diff0 = param_version_diff.count(0)
     partial_stats = {
         "fully_async/partial/total_partial_num": len(param_version_diff) - num_diff0,

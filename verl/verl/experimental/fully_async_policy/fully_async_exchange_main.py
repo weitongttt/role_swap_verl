@@ -68,13 +68,18 @@ class ExchangeAsMessageQueueClient:
     async def put_sample(self, sample: Any) -> bool:
         # Gate: only rollouter put is expected to call put_sample
         if self.enable_gate and hasattr(self.exchange_client, "gate_wait_put_sync"):
-            self.exchange_client.gate_wait_put_sync()
+            # IMPORTANT:
+            # TcpExchangeClient.gate_wait_put_sync() is a blocking socket call (wait_put).
+            # If we run it directly in an async actor (rollouter), it will block the whole
+            # event loop and prevent control-plane RPCs (e.g. bootstrap_pause/reset_staleness)
+            # from being served, causing hard deadlocks.
+            await asyncio.to_thread(self.exchange_client.gate_wait_put_sync)
         return await self.exchange_client.send_to_peer(sample)
 
     async def get_sample(self) -> Any | None:
         # Trainer uses sync path today, but keep async for compatibility.
         if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
-            self.exchange_client.gate_wait_get_sync()
+            await asyncio.to_thread(self.exchange_client.gate_wait_get_sync)
         return await self.exchange_client.recv_from_peer()
 
     def get_sample_sync(self) -> Any | None:
@@ -83,12 +88,19 @@ class ExchangeAsMessageQueueClient:
         return self.exchange_client.recv_from_peer_sync()
 
     async def get_queue_size(self) -> int:
-        stats = self.get_statistics_sync()
+        stats = await self.get_statistics()
         # For side A: incoming is b_to_a_size; for side B: incoming is a_to_b_size.
         return int(stats.get("incoming_size", 0))
 
     async def get_statistics(self) -> dict[str, Any]:
-        return self.get_statistics_sync()
+        # Prefer a real async request when supported (TcpExchangeClient has request_async),
+        # otherwise offload the sync path to a thread to avoid blocking async actors.
+        ec = self.exchange_client
+        if hasattr(ec, "request_async"):
+            stats = await ec.request_async("stats", None)
+            # Keep return type consistent with sync path.
+            return dict(stats)
+        return await asyncio.to_thread(self.get_statistics_sync)
 
     def get_statistics_sync(self) -> dict[str, Any]:
         stats = self.exchange_client.get_statistics_sync()
@@ -191,6 +203,13 @@ class FullyAsyncExchangeTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
+        # Create a single shared ResourcePoolManager for ALL roles (trainer + rollout)
+        # so that trainer WorkerDict and vLLM rollouter share the same placement group
+        # GPU slot (matching synchronous main_ppo behaviour).
+        all_roles = list(role_worker_mapping.keys()) + [Role.Rollout]
+        shared_resource_pool_manager = create_resource_pool_manager(config, roles=all_roles)
+        self.components["shared_resource_pool_manager"] = shared_resource_pool_manager
+
         # Create trainer/rollouter (same as fully_async_main, but we will wire exchange client)
         from concurrent.futures import ThreadPoolExecutor
 
@@ -270,7 +289,7 @@ class FullyAsyncExchangeTaskRunner:
                     backend: str,
                     side: str,
                     run_id: str,
-                    exchange_actor: Any | None = None,
+                    exchange_actor=None,
                     host: str = "127.0.0.1",
                     port: int = 18080,
                 ):
@@ -349,7 +368,7 @@ class FullyAsyncExchangeTaskRunner:
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=None,
-            resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
+            resource_pool_manager=self.components["shared_resource_pool_manager"],
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
             device_name=config.trainer.device,
@@ -368,7 +387,7 @@ class FullyAsyncExchangeTaskRunner:
             config=config,
             tokenizer=self.components["tokenizer"],
             role_worker_mapping=trainer_role_mapping,
-            resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
+            resource_pool_manager=self.components["shared_resource_pool_manager"],
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
             device_name=config.trainer.device,

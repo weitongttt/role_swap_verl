@@ -634,7 +634,110 @@ class FSDPEngine(BaseEngine):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
         else:
-            self.optimizer.step()
+            # Defensive: in some colocation/offload flows, optimizer states may drift to CPU
+            # while model params remain on GPU, which will crash in optimizer.step() with
+            # "cuda:0 and cpu" device mismatch.
+            #
+            # Do not rely on higher-level reload helpers only; directly migrate any optimizer
+            # state tensors whose device != param.device to param.device.
+            try:
+                if self.optimizer is not None and self.optimizer.state:
+                    # Ensure model parameters are on GPU before stepping.
+                    # In some offload/collocation flows, params may be temporarily on CPU.
+                    try:
+                        load_fsdp_model_to_gpu(self.module)
+                    except Exception:
+                        pass
+
+                    dbg = str(os.environ.get("VERL_OPT_DEVICE_DEBUG", "")).strip().lower() not in (
+                        "",
+                        "0",
+                        "false",
+                        "no",
+                        "off",
+                    )
+
+                    def _move_state_to_device(obj, dev):
+                        # Recursively move any tensors nested in optimizer state.
+                        if torch.is_tensor(obj):
+                            return obj.to(dev, non_blocking=True) if obj.device != dev else obj
+                        if isinstance(obj, dict):
+                            return {kk: _move_state_to_device(vv, dev) for kk, vv in obj.items()}
+                        if isinstance(obj, list):
+                            return [_move_state_to_device(vv, dev) for vv in obj]
+                        if isinstance(obj, tuple):
+                            return tuple(_move_state_to_device(vv, dev) for vv in obj)
+                        return obj
+
+                    def _find_mismatched_tensors(obj, dev, out, prefix=""):
+                        # Collect a few mismatches for debugging.
+                        if len(out) >= 8:
+                            return
+                        if torch.is_tensor(obj):
+                            if obj.device != dev:
+                                out.append((prefix, str(obj.device), tuple(obj.shape), str(obj.dtype)))
+                            return
+                        if isinstance(obj, dict):
+                            for kk, vv in obj.items():
+                                _find_mismatched_tensors(vv, dev, out, f"{prefix}.{kk}" if prefix else str(kk))
+                            return
+                        if isinstance(obj, (list, tuple)):
+                            for i, vv in enumerate(obj):
+                                _find_mismatched_tensors(vv, dev, out, f"{prefix}[{i}]")
+                            return
+
+                    # Iterate optimizer.state directly: in some FSDP/param-rebuild flows,
+                    # state keys may not exactly match the params listed in param_groups.
+                    for p, st in list(self.optimizer.state.items()):
+                        if p is None or not isinstance(st, dict):
+                            continue
+                        dev = getattr(p, "device", None)
+                        if dev is None:
+                            continue
+                        if dbg:
+                            mism = []
+                            _find_mismatched_tensors(st, dev, mism)
+                            if mism:
+                                print(
+                                    f"[FSDP][OPT_DEVICE_DEBUG] param_dev={dev} mismatched_state={mism}",
+                                    flush=True,
+                                )
+                        for k, v in list(st.items()):
+                            st[k] = _move_state_to_device(v, dev)
+            except Exception:
+                # Best-effort only: if reload fails, let the original error surface.
+                pass
+            try:
+                self.optimizer.step()
+            except RuntimeError as e:
+                msg = str(e)
+                if "Expected all tensors to be on the same device" in msg:
+                    try:
+                        # Always print a compact diagnostic on device mismatch.
+                        # Keep it bounded to avoid log spam.
+                        printed = 0
+                        for p, st in list(self.optimizer.state.items()):
+                            if printed >= 6:
+                                break
+                            if p is None:
+                                continue
+                            pdev = getattr(p, "device", None)
+                            g = getattr(p, "grad", None)
+                            gdev = getattr(g, "device", None) if torch.is_tensor(g) else None
+                            mism = []
+                            if isinstance(st, dict) and pdev is not None:
+                                _find_mismatched_tensors(st, pdev, mism)
+                            if mism or (gdev is not None and pdev is not None and gdev != pdev):
+                                print(
+                                    "[FSDP][OPT_DEVICE_MISMATCH] "
+                                    f"param_dev={pdev} grad_dev={gdev} "
+                                    f"state_mismatches={mism}",
+                                    flush=True,
+                                )
+                                printed += 1
+                    except Exception:
+                        pass
+                raise
 
         if self._qat_enabled:
             from verl.utils.qat.core import invalidate_all_scales

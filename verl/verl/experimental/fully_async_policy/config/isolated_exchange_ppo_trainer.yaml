@@ -1,0 +1,55 @@
+hydra:
+  searchpath:
+    - file://verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+trainer:
+  use_legacy_worker_impl: disable
+
+async_training:
+  staleness_threshold: 0.1
+  trigger_parameter_sync_step: 4
+  require_batches: 1
+  partial_rollout: True
+  use_trainer_do_validate: False
+
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 4
+  n: 4
+  total_rollout_steps: 100
+
+data:
+  gen_batch_size: 1
+
+actor_rollout_ref:
+  rollout:
+    calculate_log_probs: True
+    checkpoint_engine:
+      backend: "nccl"
+  actor:
+    use_rollout_log_probs: True
+  model:
+    use_remove_padding: True
+
+algorithm:
+  rollout_correction:
+    bypass_mode: True
+
+# Cross-cluster exchange settings.
+# Launch two jobs with the same run_id:
+# - Side A: exchange.side=A, exchange.mode=both   (A rollout first)
+# - Side B: exchange.side=B, exchange.mode=both   (B trainer first)
+exchange:
+  run_id: "exp_default"
+  side: "A"
+  mode: "both"
+  backend: "tcp"        # ray or tcp
+  host: "127.0.0.1"
+  port: 28080
+  max_queue_size: 20000
+  enable_gate: true
+  bootstrap_b_pause_rollouter: true

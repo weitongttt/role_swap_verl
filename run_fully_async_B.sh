@@ -10,6 +10,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3}
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6380}
 export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
 export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
+export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-1}"
 export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
 # vLLM 这里实际走的是 v1 AsyncLLMEngine；环境变量不一致会直接报错。
 export VLLM_USE_V1=${VLLM_USE_V1:-1}
@@ -66,7 +67,7 @@ trigger_parameter_sync_step=1
 partial_rollout=false
 
 project_name="role_swap"
-experiment_name="test_0319_stale_B"
+experiment_name="test_0325_stale_B"
 
 # 等待 A 写入 exchange.run_id 文件，避免 A/B 用到不同通道
 EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
@@ -127,5 +128,6 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
+    actor_rollout_ref.rollout.agent.num_workers=1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size}
 

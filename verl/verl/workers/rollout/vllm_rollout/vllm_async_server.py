@@ -627,8 +627,28 @@ class vLLMHttpServer:
             logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
-        if self.node_rank != 0 or not self.config.free_cache_engine:
+        if self.node_rank != 0:
             return
+
+        # Escape hatch: allow sleep to run even when free_cache_engine=false.
+        # This is useful for colocated async PPO weight sync (update_weights_from_ipc)
+        # where KV/prefix cache retention can cause OOM at tensor.clone() during weight reception.
+        force = str(os.environ.get("VERL_FORCE_VLLM_SLEEP", "")).strip().lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        if not self.config.free_cache_engine and not force:
+            return
+
+        logger.info(
+            "[vLLM] sleep ENTER free_cache_engine=%s VERL_FORCE_VLLM_SLEEP=%s rollout_mode=%s",
+            self.config.free_cache_engine,
+            force,
+            self.rollout_mode,
+        )
 
         if self.rollout_mode == RolloutMode.HYBRID:
             # Don't use engine.sleep(level=2) here

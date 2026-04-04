@@ -1,0 +1,56 @@
+# Colocated hybrid-engine PPO + TCP sample exchange (A/B).
+# Same data / algorithm contract as fully_async_exchange_main:
+#   - RolloutSample + assemble_batch_from_rollout_samples
+#   - async_training.{require_batches,staleness_threshold,trigger_parameter_sync_step,...}
+# Cluster-internal: single global_pool + hybrid_engine (main_ppo-style weight sync to vLLM).
+
+hydra:
+  searchpath:
+    - file://verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+trainer:
+  use_legacy_worker_impl: disable
+
+async_training:
+  staleness_threshold: 0.1
+  trigger_parameter_sync_step: 4
+  require_batches: 1
+  partial_rollout: True
+  use_trainer_do_validate: False
+
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 8
+  n: 4
+  total_rollout_steps: 100
+
+data:
+  gen_batch_size: 1
+
+actor_rollout_ref:
+  # Required for RayPPOTrainer (colocated training + vLLM replicas on same worker pool).
+  hybrid_engine: true
+  rollout:
+    calculate_log_probs: True
+    agent:
+      agent_loop_manager_class: verl.experimental.fully_async_policy.agent_loop.agent_loop.FullyAsyncAgentLoopManager
+    engine_kwargs:
+      vllm:
+        compilation_config:
+          level: 0
+          use_inductor: false
+          cudagraph_mode: NONE
+    checkpoint_engine:
+      backend: "naive"
+  actor:
+    use_rollout_log_probs: True
+  model:
+    use_remove_padding: True
+
+algorithm:
+  rollout_correction:
+    bypass_mode: True
