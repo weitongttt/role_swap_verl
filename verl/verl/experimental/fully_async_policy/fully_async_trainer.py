@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -146,9 +147,15 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             else Role.Actor
         )
 
-        # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
+        # required_samples means "required queue items per train step".
+        # In exchange bs-mode, one queue item can already represent a full rollout batch.
         self.require_batches = config.async_training.require_batches
-        self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        train_need = int(config.actor_rollout_ref.actor.ppo_mini_batch_size) * int(self.require_batches)
+        gen_bsz = int(config.data.gen_batch_size)
+        if hasattr(config, "exchange"):
+            self.required_samples = int(math.ceil(train_need / max(1, gen_bsz)))
+        else:
+            self.required_samples = train_need
         total_gpus = (
             config.trainer.nnodes * config.trainer.n_gpus_per_node
             + config.rollout.nnodes * config.rollout.n_gpus_per_node
@@ -254,6 +261,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         use_batch = hasattr(self.message_queue_client, "get_samples_batch_sync")
         mq = self.message_queue_client
+        exchange_cfg = getattr(self.config, "exchange", None)
+        if exchange_cfg is not None and not use_batch:
+            raise RuntimeError(
+                "exchange mode requires batched queue pull (get_samples_batch_sync) to keep bs-granularity training"
+            )
         stop_monitor = asyncio.Event()
         enable_monitor = os.environ.get("VERL_MQ_MONITOR", "1").strip().lower() not in (
             "0",

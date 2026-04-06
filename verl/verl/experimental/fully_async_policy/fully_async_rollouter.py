@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import math
 import multiprocessing
 import os
 import time
@@ -66,7 +67,12 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         assert not self.hybrid_engine
         assert self.config.data.train_batch_size == 0, "train_batch_size must be zero"
-        assert self.config.data.gen_batch_size == 1, "gen_batch_size must be one"
+        assert int(self.config.data.gen_batch_size) > 0, "gen_batch_size must be positive"
+        # Isolated exchange now runs in bs-granularity; keep rollout prompt fetch batch aligned with train batch.
+        if hasattr(self.config, "exchange"):
+            assert int(self.config.data.gen_batch_size) == int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size), (
+                "in isolated exchange mode, data.gen_batch_size must equal actor.ppo_mini_batch_size"
+            )
         assert self.config.async_training.staleness_threshold >= 0, "staleness_threshold must larger than 0"
         assert self.config.async_training.trigger_parameter_sync_step >= 1, (
             "trigger_parameter_sync_step must larger or equal than 1"
@@ -146,11 +152,24 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         # Config
         self.staleness_threshold: float = config.async_training.get("staleness_threshold", 1)
-        # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
+        # Queue consume unit:
+        # - non-exchange: one queue item ~ one rollout sample, so keep legacy semantics.
+        # - exchange bs-mode: one queue item is a full rollout batch (gen_batch_size prompts).
+        #   required_samples then means "required queue items per train step".
         self.require_batches = config.async_training.require_batches
-        self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        train_need = int(config.actor_rollout_ref.actor.ppo_mini_batch_size) * int(self.require_batches)
+        gen_bsz = int(config.data.gen_batch_size)
+        if hasattr(self.config, "exchange"):
+            self.required_samples = int(math.ceil(train_need / max(1, gen_bsz)))
+        else:
+            self.required_samples = train_need
         self.max_required_samples = None
         self.max_concurrent_samples = None
+        # Exchange batch-mode budget:
+        # when incoming < required_samples, produce exactly one required_samples block,
+        # then pause and let trainer consume one block.
+        self._exchange_refill_budget = 0
+        self._exchange_refill_round = 0
         # queue size
         self.max_queue_size = None
 
@@ -211,6 +230,11 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             _conc_mult = int(self.config.async_training.get("rollout_concurrent_multiplier", 32))
             self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * _conc_mult
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
+            # In isolated exchange mode, cap concurrent dispatch to one train block
+            # so "refill one bs" is not over-shot by too many in-flight tasks.
+            exchange_cfg = getattr(self.config, "exchange", None)
+            if exchange_cfg is not None and bool(getattr(exchange_cfg, "rollout_pause_when_incoming_ready", True)):
+                self.max_concurrent_samples = min(self.max_concurrent_samples, int(self.required_samples))
             self.max_queue_size = self.max_required_samples
 
             print(
@@ -592,11 +616,19 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 # to determine whether it is the pause phase, otherwise continue to wait
                 while self.paused:
                     await self.condition.wait()
+                exchange_cfg = getattr(self.config, "exchange", None)
+                if exchange_cfg is not None and bool(getattr(exchange_cfg, "rollout_pause_when_incoming_ready", True)):
+                    # Batch-mode: if this refill block budget is exhausted, stop dispatching new
+                    # tasks and let outer loop go through pause/recheck logic.
+                    if self._exchange_refill_budget <= 0:
+                        continue
                 task = safe_create_task(
                     self._process_single_sample_streaming(rollout_sample),
                     name=rollout_sample.sample_id,
                     task_set=self.active_tasks,
                 )
+                if exchange_cfg is not None and bool(getattr(exchange_cfg, "rollout_pause_when_incoming_ready", True)):
+                    self._exchange_refill_budget -= 1
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
@@ -795,6 +827,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # 让本侧 trainer 从 incoming 拉够一批再训练（与 ppo_mini_batch_size*require_batches 对齐）。
         if exchange_cfg is not None and bool(getattr(exchange_cfg, "rollout_pause_when_incoming_ready", True)):
             if incoming >= self.required_samples:
+                # incoming already has one full train block; stop producing and wait trainer consume it.
+                self._exchange_refill_budget = 0
                 if not self.paused:
                     print(
                         "[FullyAsyncRollouter][ShouldPause] exchange incoming "
@@ -803,6 +837,16 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                         flush=True,
                     )
                 return True
+            # incoming not enough: start exactly one refill block.
+            if self._exchange_refill_budget <= 0:
+                self._exchange_refill_round += 1
+                self._exchange_refill_budget = int(self.required_samples)
+                print(
+                    "[FullyAsyncRollouter][ShouldPause] exchange incoming "
+                    f"{incoming} < required_samples {self.required_samples} "
+                    f"-> start refill round={self._exchange_refill_round}, budget={self._exchange_refill_budget}",
+                    flush=True,
+                )
             return False
 
         if pause_on_staleness and self.staleness_samples >= self.max_required_samples:

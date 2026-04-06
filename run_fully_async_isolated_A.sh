@@ -27,19 +27,19 @@ export RAY_DEDUP_LOGS=0
 export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
 # SwanLab
 PROJECT_NAME="new_role_swap_2026.4"
-EXPERIMENT_NAME="isolated_A_v1"
+EXPERIMENT_NAME="isolated_A_v2.1"
 
 MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
 TRAIN_FILES="data/gsm8k/train.parquet"
 VAL_FILES="data/gsm8k/train.parquet"
 TRAIN_PROMPT_BSZ="0"
-GEN_PROMPT_BSZ="1"
+MINI_BATCH_SIZE="160"
+GEN_PROMPT_BSZ="${MINI_BATCH_SIZE}"
 # 与 run_sync_1gpu_test.sh 对齐 vLLM/KV 占用：max_prompt_length=512、max_response_length=512；长上下文会显著增大 vLLM 显存
 MAX_PROMPT_LENGTH="512"
 MAX_RESPONSE_LENGTH="512"
 N_RESP_PER_PROMPT="4"
-TOTAL_ROLLOUT_STEPS="64000"
-MINI_BATCH_SIZE="160"
+TOTAL_ROLLOUT_STEPS="200"
 REQUIRE_BATCHES="1"
 ROLLOUT_NAME="vllm"
 ROLLOUT_MODE="async"
