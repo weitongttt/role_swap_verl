@@ -6,35 +6,37 @@ set -x
 # Side A: 默认负责 rollout + train
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="/zhangshihao/weitong/verl_swap/verl/verl/trainer/config"
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
-export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
-export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
-export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
-export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-1}"
-export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
+export CUDA_VISIBLE_DEVICES=0,1
+export RAY_ADDRESS=127.0.0.1:6379
+export EXCHANGE_HOST=127.0.0.1
+export EXCHANGE_PORT=18080
+export VERL_EXCHANGE_DEBUG="1"
+export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
 # vLLM 这里实际走的是 v1 AsyncLLMEngine；环境变量不一致会直接报错。
 # 统一设为 1（如再遇到 v1 profiling assert，我们再做初始化阶段的隔离/降并发）。
-export VLLM_USE_V1=${VLLM_USE_V1:-1}
+export VLLM_USE_V1=1
 # Ray 默认会对重复日志做去重，容易看起来“卡住没输出”
-export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+export RAY_DEDUP_LOGS=0
 
 # CPU 绑核隔离（A 用 0-29）
-export CPUSET_A=${CPUSET_A:-0-29}
-export RAY_NUM_CPUS_A=${RAY_NUM_CPUS_A:-30}
+export CPUSET_A=0-29
+export RAY_NUM_CPUS_A=30
 
 # 固定用同一个本机 Ray 集群（由 A 启动 head）
-RAY_BIN="${RAY_BIN:-}"
+RAY_BIN=""
 if [ -z "$RAY_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/ray" ]; then
   RAY_BIN="${CONDA_PREFIX}/bin/ray"
 fi
 if [ -z "$RAY_BIN" ] && [ -x "/zhangshihao/weitong/anaconda3/envs/verl/bin/ray" ]; then
   RAY_BIN="/zhangshihao/weitong/anaconda3/envs/verl/bin/ray"
 fi
-RAY_BIN="${RAY_BIN:-ray}"
+if [ -z "$RAY_BIN" ]; then
+  RAY_BIN="ray"
+fi
 
 # A 集群严格只看见 0,1（硬隔离）
-CUDA_VISIBLE_DEVICES_A="${CUDA_VISIBLE_DEVICES_A:-0,1}"
-RAY_TEMP_DIR_A="${RAY_TEMP_DIR_A:-/tmp/ray_a}"
+CUDA_VISIBLE_DEVICES_A="0,1"
+RAY_TEMP_DIR_A="/tmp/ray_a"
 mkdir -p "$RAY_TEMP_DIR_A"
 
 # 不要在脚本里全局 ray stop（会把 B 的集群也杀掉）。只在本端口未启动时启动 head。
@@ -72,7 +74,7 @@ project_name="role_swap"
 experiment_name="test_0325_stale_A"
 
 # 让 A/B 共用同一个 exchange.run_id（A 会创建，B 会等待）
-EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
+EXCHANGE_RUN_ID_FILE="/tmp/verl_exchange_run_id"
 if [ ! -f "$EXCHANGE_RUN_ID_FILE" ]; then
   date +%s%N > "$EXCHANGE_RUN_ID_FILE"
 fi
@@ -83,7 +85,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     data.val_files=${val_files} \
     data.train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
-    data.return_raw_chat=${return_raw_chat:-True} \
+    data.return_raw_chat=True \
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V1=\"${VLLM_USE_V1}\"" \
     data.shuffle=True \
     data.max_response_length=${max_response_length} \

@@ -135,6 +135,9 @@ trainer:
   # Number of generations to log during validation
   log_val_generations: 0
 
+  # If true, print rollout/train phase boundaries to stderr each step (works inside Ray TaskRunner)
+  ppo_step_trace_log: False
+
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 

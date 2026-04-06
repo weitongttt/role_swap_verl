@@ -255,7 +255,18 @@ def compute_timing_metrics(batch: DataProto, timing_raw: dict[str, float]) -> di
 
     num_tokens_of_section = {
         "gen": num_response_tokens,
-        **{name: num_overall_tokens for name in ["ref", "values", "adv", "update_critic", "update_actor"]},
+        **{
+            name: num_overall_tokens
+            for name in [
+                "ref",
+                "values",
+                "adv",
+                "update_critic",
+                "update_actor",
+                # sync PPO: step body until first optimizer (see ray_trainer batch_assembly_to_train)
+                "batch_assembly_to_train",
+            ]
+        },
     }
 
     return {

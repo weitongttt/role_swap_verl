@@ -20,6 +20,8 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import sys
+import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -1227,6 +1229,18 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
+    def _log_ppo_step_trace(self, message: str) -> None:
+        """Print step boundaries on stderr (TaskRunner is a Ray worker; config always arrives, env may not)."""
+        env_on = os.environ.get("VERL_PPO_STEP_LOG", "").strip().lower() in ("1", "true", "yes")
+        cfg_on = bool(self.config.trainer.get("ppo_step_trace_log", False))
+        if not (env_on or cfg_on):
+            return
+        print(
+            f"[verl.ppo.step][global_step={self.global_steps}] {message}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1314,7 +1328,18 @@ class RayPPOTrainer:
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
+                    # Wall time from step body start until batch is ready for the first optimizer call (gen→reward→logprob→adv).
+                    # Note: fully_async/rollouter/version_time is rollouter-side (between staleness resets), not this quantity.
+                    _ppo_step_body_t0 = time.perf_counter()
                     # generate a batch
+                    # NOTE: gen_batch may have batch=None (tensors remain on `batch` after _get_gen_batch); do not use len(gen_batch.batch).
+                    _n_prompt = len(batch.batch)
+                    _n_rollout = self.config.actor_rollout_ref.rollout.n
+                    self._log_ppo_step_trace(
+                        f"rollout start | n_prompts={_n_prompt} rollout.n={_n_rollout} "
+                        f"sequences_to_generate={_n_prompt * _n_rollout}",
+                    )
+                    _rollout_wall_t0 = time.perf_counter()
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.async_rollout_manager.start_profile()
@@ -1325,6 +1350,11 @@ class RayPPOTrainer:
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                    _rollout_wall_s = time.perf_counter() - _rollout_wall_t0
+                    self._log_ppo_step_trace(
+                        f"rollout end | generate_sequences done | task_runner_wall_s={_rollout_wall_s:.2f} "
+                        f"(与 Ray 多进程日志交错时可能显得「挨着」；整步耗时见 timing_s/gen / tqdm)"
+                    )
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1357,6 +1387,9 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    self._log_ppo_step_trace(
+                        f"merged batch | n_sequences={len(batch.batch)} (= n_prompts * rollout.n)",
+                    )
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1385,6 +1418,9 @@ class RayPPOTrainer:
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
+                    self._log_ppo_step_trace(
+                        "train phase start | reward done; next: old_log_prob / ref / values / advantage",
+                    )
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
@@ -1493,6 +1529,8 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                    self._log_ppo_step_trace("optimizer phase start | critic then actor backward/update")
+                    timing_raw["batch_assembly_to_train"] = time.perf_counter() - _ppo_step_body_t0
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):

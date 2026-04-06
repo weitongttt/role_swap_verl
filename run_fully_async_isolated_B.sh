@@ -8,52 +8,52 @@ export PYTHONPATH="${_REPO_ROOT}/verl${PYTHONPATH:+:${PYTHONPATH}}"
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="${_REPO_ROOT}/verl/verl/trainer/config"
 # B 集群仅使用第 2 张物理 GPU（与 A 硬隔离）
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
-export RAY_PORT_B=${RAY_PORT_B:-26380}
+export CUDA_VISIBLE_DEVICES=1
+export RAY_PORT_B=26380
 # 与 A 侧相同：指向同一台 exchange 服务（可路由 IP）；多 Pod 时不要用各 Pod 的 127.0.0.1
-export EXCHANGE_HOST="${EXCHANGE_HOST:-127.0.0.1}"
-export EXCHANGE_PORT=${EXCHANGE_PORT:-28080}
+export EXCHANGE_HOST="127.0.0.1"
+export EXCHANGE_PORT=28080
 # 默认关闭：减少 MQ/TCP 路径上的调试输出（需要排查 gate 时再 export VERL_EXCHANGE_DEBUG=1）
-export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-0}"
-export VLLM_USE_V1=${VLLM_USE_V1:-1}
+export VERL_EXCHANGE_DEBUG="0"
+export VLLM_USE_V1=1
 # 设备错配调试：默认开启，确保 optimizer/device mismatch 时能打印出具体 state/grad 的 device
-export VERL_OPT_DEVICE_DEBUG="${VERL_OPT_DEVICE_DEBUG:-1}"
+export VERL_OPT_DEVICE_DEBUG="1"
 # # 参数同步前让 vLLM 真正执行 sleep（绕过 free_cache_engine=false 短路），减轻 update_weights_from_ipc OOM
-# export VERL_FORCE_VLLM_SLEEP="${VERL_FORCE_VLLM_SLEEP:-1}"
-export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
-export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
-# SwanLab：可通过 PROJECT_NAME / EXPERIMENT_NAME 覆盖
-PROJECT_NAME="${PROJECT_NAME:-new_role_swap_2026.4}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-isolated_B_v1}"
+# export VERL_FORCE_VLLM_SLEEP=1
+export RAY_DEDUP_LOGS=0
+export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
+# SwanLab
+PROJECT_NAME="new_role_swap_2026.4"
+EXPERIMENT_NAME="isolated_B_v1"
 
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-0.5B-Instruct}"
-TRAIN_FILES="${TRAIN_FILES:-data/gsm8k/train.parquet}"
-VAL_FILES="${VAL_FILES:-data/gsm8k/train.parquet}"
-TRAIN_PROMPT_BSZ="${TRAIN_PROMPT_BSZ:-0}"
-GEN_PROMPT_BSZ="${GEN_PROMPT_BSZ:-1}"
+MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
+TRAIN_FILES="data/gsm8k/train.parquet"
+VAL_FILES="data/gsm8k/train.parquet"
+TRAIN_PROMPT_BSZ="0"
+GEN_PROMPT_BSZ="1"
 # 与 run_sync_1gpu_test.sh 对齐 vLLM/KV：512+512；长上下文会显著增大 vLLM 显存
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-512}"
-N_RESP_PER_PROMPT="${N_RESP_PER_PROMPT:-4}"
-TOTAL_ROLLOUT_STEPS="${TOTAL_ROLLOUT_STEPS:-64000}"
-MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-160}"
-REQUIRE_BATCHES="${REQUIRE_BATCHES:-1}"
-ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
-ROLLOUT_MODE="${ROLLOUT_MODE:-async}"
-ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo}"
-USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-true}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_RESPONSE_LENGTH * 4))}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.35}"
-STALENESS_THRESHOLD="${STALENESS_THRESHOLD:-100}"
-TRIGGER_PARAM_SYNC_STEP="${TRIGGER_PARAM_SYNC_STEP:-1}"
-PARTIAL_ROLLOUT="${PARTIAL_ROLLOUT:-false}"
-TEST_FREQ="${TEST_FREQ:-1000}"
-NUM_RAY_GPUS="${NUM_RAY_GPUS:-1}"
+MAX_PROMPT_LENGTH="512"
+MAX_RESPONSE_LENGTH="512"
+N_RESP_PER_PROMPT="4"
+TOTAL_ROLLOUT_STEPS="64000"
+MINI_BATCH_SIZE="160"
+REQUIRE_BATCHES="1"
+ROLLOUT_NAME="vllm"
+ROLLOUT_MODE="async"
+ADV_ESTIMATOR="grpo"
+USE_DYNAMIC_BSZ="true"
+MAX_MODEL_LEN="1024"
+MAX_NUM_BATCHED_TOKENS="8192"
+GPU_MEM_UTIL="0.35"
+STALENESS_THRESHOLD="100"
+TRIGGER_PARAM_SYNC_STEP="1"
+PARTIAL_ROLLOUT="false"
+TEST_FREQ="1000"
+NUM_RAY_GPUS="1"
 # 与 A 侧一致：多 AgentLoopWorker 并行打 vLLM（export AGENT_NUM_WORKERS=8 等可再拉高，OOM 则减小）
-AGENT_NUM_WORKERS="${AGENT_NUM_WORKERS:-6}"
+AGENT_NUM_WORKERS="6"
 
-EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
+EXCHANGE_RUN_ID_FILE="/tmp/verl_exchange_run_id"
 for i in $(seq 1 180); do
   if [ -f "$EXCHANGE_RUN_ID_FILE" ]; then
     break
@@ -76,14 +76,16 @@ fi
 # Let ray.init() start an in-process local cluster; avoid external ray start session conflicts.
 unset RAY_ADDRESS
 
-PYTHON_BIN="${PYTHON_BIN:-}"
+PYTHON_BIN=""
 if [ -z "$PYTHON_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
   PYTHON_BIN="${CONDA_PREFIX}/bin/python"
 fi
 if [ -z "$PYTHON_BIN" ] && [ -x "/zhangshihao/weitong/anaconda3/envs/verl/bin/python" ]; then
   PYTHON_BIN="/zhangshihao/weitong/anaconda3/envs/verl/bin/python"
 fi
-PYTHON_BIN="${PYTHON_BIN:-python}"
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="python"
+fi
 
 #   "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_FORCE_VLLM_SLEEP=\"${VERL_FORCE_VLLM_SLEEP}\"" \
 PYTHONUNBUFFERED=1 "$PYTHON_BIN" -m verl.experimental.fully_async_policy.fully_async_isolated_exchange_main \

@@ -6,34 +6,36 @@ set -x
 # Side B: 启动时先从 train 开始，吃到 A 的 rollout 后再启动自己的 rollout
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="/zhangshihao/weitong/verl_swap/verl/verl/trainer/config"
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3}
-export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6380}
-export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
-export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
-export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-1}"
-export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
+export CUDA_VISIBLE_DEVICES=2,3
+export RAY_ADDRESS=127.0.0.1:6380
+export EXCHANGE_HOST=127.0.0.1
+export EXCHANGE_PORT=18080
+export VERL_EXCHANGE_DEBUG="1"
+export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
 # vLLM 这里实际走的是 v1 AsyncLLMEngine；环境变量不一致会直接报错。
-export VLLM_USE_V1=${VLLM_USE_V1:-1}
+export VLLM_USE_V1=1
 # Ray 默认会对重复日志做去重，容易看起来“卡住没输出”
-export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+export RAY_DEDUP_LOGS=0
 
 # CPU 绑核隔离（B 用 32-63）
-export CPUSET_B=${CPUSET_B:-30-59}
-export RAY_NUM_CPUS_B=${RAY_NUM_CPUS_B:-30}
+export CPUSET_B=30-59
+export RAY_NUM_CPUS_B=30
 
 # 确保找得到 ray（B 不启动 head，但会依赖 ray.init 连接集群）
-RAY_BIN="${RAY_BIN:-}"
+RAY_BIN=""
 if [ -z "$RAY_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/ray" ]; then
   RAY_BIN="${CONDA_PREFIX}/bin/ray"
 fi
 if [ -z "$RAY_BIN" ] && [ -x "/zhangshihao/weitong/anaconda3/envs/verl/bin/ray" ]; then
   RAY_BIN="/zhangshihao/weitong/anaconda3/envs/verl/bin/ray"
 fi
-RAY_BIN="${RAY_BIN:-ray}"
+if [ -z "$RAY_BIN" ]; then
+  RAY_BIN="ray"
+fi
 
 # B 集群严格只看见 2,3（硬隔离）
-CUDA_VISIBLE_DEVICES_B="${CUDA_VISIBLE_DEVICES_B:-2,3}"
-RAY_TEMP_DIR_B="${RAY_TEMP_DIR_B:-/tmp/ray_b}"
+CUDA_VISIBLE_DEVICES_B="2,3"
+RAY_TEMP_DIR_B="/tmp/ray_b"
 mkdir -p "$RAY_TEMP_DIR_B"
 
 # 不要在脚本里全局 ray stop（会把 A 的集群也杀掉）。只在本端口未启动时启动 head。
@@ -70,7 +72,7 @@ project_name="role_swap"
 experiment_name="test_0325_stale_B"
 
 # 等待 A 写入 exchange.run_id 文件，避免 A/B 用到不同通道
-EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
+EXCHANGE_RUN_ID_FILE="/tmp/verl_exchange_run_id"
 for i in $(seq 1 180); do
   if [ -f "$EXCHANGE_RUN_ID_FILE" ]; then
     break
@@ -88,7 +90,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     data.val_files=${val_files} \
     data.train_batch_size=${train_prompt_bsz} \
     data.gen_batch_size=${gen_prompt_bsz} \
-    data.return_raw_chat=${return_raw_chat:-True} \
+    data.return_raw_chat=True \
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V1=\"${VLLM_USE_V1}\"" \
     data.shuffle=True \
     data.max_response_length=${max_response_length} \

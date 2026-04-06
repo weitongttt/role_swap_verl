@@ -9,57 +9,58 @@ export PYTHONPATH="${_REPO_ROOT}/verl${PYTHONPATH:+:${PYTHONPATH}}"
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="${_REPO_ROOT}/verl/verl/trainer/config"
 # A 集群仅使用第 1 张物理 GPU（与 B 硬隔离）
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-export RAY_PORT_A=${RAY_PORT_A:-26379}
+export CUDA_VISIBLE_DEVICES=0
+export RAY_PORT_A=26379
 # 客户端连的地址：必须与「正在跑 run_exchange_server 的那台机器」对训练 Pod 可路由的 IP 一致（同机可 127.0.0.1）。
 # 多 Pod 时禁止使用各 Pod 自带的 127.0.0.1，否则 A、B 各连一个空 exchange，表现为 pull 永远阻塞、另一侧队列疯长。
-export EXCHANGE_HOST="${EXCHANGE_HOST:-127.0.0.1}"
-export EXCHANGE_PORT=${EXCHANGE_PORT:-28080}
+export EXCHANGE_HOST="127.0.0.1"
+export EXCHANGE_PORT=28080
 # 默认关闭：减少 MQ/TCP 路径上的调试输出（需要排查 gate 时再 export VERL_EXCHANGE_DEBUG=1）
-export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-0}"
-export VLLM_USE_V1=${VLLM_USE_V1:-1}
+export VERL_EXCHANGE_DEBUG="0"
+export VLLM_USE_V1=1
 export VERL_SYNC_DEBUG=1
 # 设备错配调试：默认开启，确保 optimizer/device mismatch 时能打印出具体 state/grad 的 device
-export VERL_OPT_DEVICE_DEBUG="${VERL_OPT_DEVICE_DEBUG:-1}"
+export VERL_OPT_DEVICE_DEBUG="1"
 # 参数同步前让 vLLM 真正执行 sleep（绕过 free_cache_engine=false 短路），减轻 update_weights_from_ipc OOM
-# export VERL_FORCE_VLLM_SLEEP="${VERL_FORCE_VLLM_SLEEP:-1}"
-export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
-export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
-# SwanLab：可通过 PROJECT_NAME / EXPERIMENT_NAME 覆盖
-PROJECT_NAME="${PROJECT_NAME:-new_role_swap_2026.4}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-isolated_A_v1}"
+# export VERL_FORCE_VLLM_SLEEP=1
+export RAY_DEDUP_LOGS=0
+export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
+# SwanLab
+PROJECT_NAME="new_role_swap_2026.4"
+EXPERIMENT_NAME="isolated_A_v1"
 
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-0.5B-Instruct}"
-TRAIN_FILES="${TRAIN_FILES:-data/gsm8k/train.parquet}"
-VAL_FILES="${VAL_FILES:-data/gsm8k/train.parquet}"
-TRAIN_PROMPT_BSZ="${TRAIN_PROMPT_BSZ:-0}"
-GEN_PROMPT_BSZ="${GEN_PROMPT_BSZ:-1}"
+MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
+TRAIN_FILES="data/gsm8k/train.parquet"
+VAL_FILES="data/gsm8k/train.parquet"
+TRAIN_PROMPT_BSZ="0"
+GEN_PROMPT_BSZ="1"
 # 与 run_sync_1gpu_test.sh 对齐 vLLM/KV 占用：max_prompt_length=512、max_response_length=512；长上下文会显著增大 vLLM 显存
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-512}"
-N_RESP_PER_PROMPT="${N_RESP_PER_PROMPT:-4}"
-TOTAL_ROLLOUT_STEPS="${TOTAL_ROLLOUT_STEPS:-64000}"
-MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-160}"
-REQUIRE_BATCHES="${REQUIRE_BATCHES:-1}"
-ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
-ROLLOUT_MODE="${ROLLOUT_MODE:-async}"
-ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo}"
-USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-true}"
+MAX_PROMPT_LENGTH="512"
+MAX_RESPONSE_LENGTH="512"
+N_RESP_PER_PROMPT="4"
+TOTAL_ROLLOUT_STEPS="64000"
+MINI_BATCH_SIZE="160"
+REQUIRE_BATCHES="1"
+ROLLOUT_NAME="vllm"
+ROLLOUT_MODE="async"
+ADV_ESTIMATOR="grpo"
+USE_DYNAMIC_BSZ="true"
 # sync 侧等价上下文约 512+512；默认给 1024 余量
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_RESPONSE_LENGTH * 4))}"
+MAX_MODEL_LEN="1024"
+# 与 main_ppo 默认 vLLM max_num_batched_tokens=8192 同量级；GEN_PROMPT_BSZ 大时勿用过小的 2048
+MAX_NUM_BATCHED_TOKENS="8192"
 # 与 run_sync_1gpu_test.sh 的 actor_rollout_ref.rollout.gpu_memory_utilization=0.4 一致
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.35}"
-STALENESS_THRESHOLD="${STALENESS_THRESHOLD:-100}"
-TRIGGER_PARAM_SYNC_STEP="${TRIGGER_PARAM_SYNC_STEP:-1}"
-PARTIAL_ROLLOUT="${PARTIAL_ROLLOUT:-false}"
-TEST_FREQ="${TEST_FREQ:-1000}"
+GPU_MEM_UTIL="0.35"
+STALENESS_THRESHOLD="100"
+TRIGGER_PARAM_SYNC_STEP="1"
+PARTIAL_ROLLOUT="false"
+TEST_FREQ="1000"
 # 单集群 1 槽位：trainer 与 vLLM hybrid 共置（见 isolated main 传入 shared_actor_rollout_wg）
-NUM_RAY_GPUS="${NUM_RAY_GPUS:-1}"
+NUM_RAY_GPUS="1"
 # FullyAsyncAgentLoopWorker 个数：每个 Ray actor 可向 vLLM 发请求；>1 才有「同时多路」推理（单 actor 内任务默认串行）
-AGENT_NUM_WORKERS="${AGENT_NUM_WORKERS:-6}"
+AGENT_NUM_WORKERS="6"
 
-EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
+EXCHANGE_RUN_ID_FILE="/tmp/verl_exchange_run_id"
 # 每次启动都生成新的 run_id，避免 tcp exchange server 复用旧 run 状态（包括历史的 None 终止哨兵）
 # 导致下一轮直接在 sample 队列中提前结束。
 date +%s%N > "$EXCHANGE_RUN_ID_FILE"
@@ -71,14 +72,16 @@ printf "%s\n" "$TOTAL_ROLLOUT_STEPS" > "${EXCHANGE_RUN_ID_FILE}.total_rollout_st
 # Let ray.init() start an in-process local cluster; avoid external ray start session conflicts.
 unset RAY_ADDRESS
 
-PYTHON_BIN="${PYTHON_BIN:-}"
+PYTHON_BIN=""
 if [ -z "$PYTHON_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
   PYTHON_BIN="${CONDA_PREFIX}/bin/python"
 fi
 if [ -z "$PYTHON_BIN" ] && [ -x "/zhangshihao/weitong/anaconda3/envs/verl/bin/python" ]; then
   PYTHON_BIN="/zhangshihao/weitong/anaconda3/envs/verl/bin/python"
 fi
-PYTHON_BIN="${PYTHON_BIN:-python}"
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="python"
+fi
 
 #   "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_FORCE_VLLM_SLEEP=\"${VERL_FORCE_VLLM_SLEEP}\"" \
 PYTHONUNBUFFERED=1 "$PYTHON_BIN" -m verl.experimental.fully_async_policy.fully_async_isolated_exchange_main \

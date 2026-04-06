@@ -51,4 +51,7 @@ def get_ppo_ray_runtime_env():
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    # TaskRunner / workers may not inherit shell exports; forward explicit debug flags into Ray.
+    if os.environ.get("VERL_PPO_STEP_LOG"):
+        runtime_env["env_vars"]["VERL_PPO_STEP_LOG"] = os.environ["VERL_PPO_STEP_LOG"]
     return runtime_env
