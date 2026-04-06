@@ -3,7 +3,7 @@ import os
 import socket
 import time
 from pprint import pprint
-from typing import Any
+from typing import Any, List, Tuple
 
 import hydra
 import ray
@@ -58,6 +58,17 @@ class _LoggingExchangeAsMQ(ExchangeAsMessageQueueClient):
         else:
             print(f"[EXCHANGE_DEBUG][MQ] get_sample_sync LEAVE side={side} repr={repr(out)[:200]}", flush=True)
         return out
+
+    def get_samples_batch_sync(self, n: int) -> Tuple[List[Any], int]:
+        ec = self.exchange_client
+        side = getattr(ec, "side", "?")
+        print(f"[EXCHANGE_DEBUG][MQ] get_samples_batch_sync ENTER side={side} n={n}", flush=True)
+        items, qlen = super().get_samples_batch_sync(n)
+        print(
+            f"[EXCHANGE_DEBUG][MQ] get_samples_batch_sync LEAVE side={side} n={len(items)} qlen={qlen}",
+            flush=True,
+        )
+        return items, qlen
 
 
 @ray.remote(num_cpus=1)

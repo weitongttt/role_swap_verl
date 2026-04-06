@@ -13,7 +13,8 @@ export RAY_PORT_B=${RAY_PORT_B:-26380}
 # 与 A 侧相同：指向同一台 exchange 服务（可路由 IP）；多 Pod 时不要用各 Pod 的 127.0.0.1
 export EXCHANGE_HOST="${EXCHANGE_HOST:-127.0.0.1}"
 export EXCHANGE_PORT=${EXCHANGE_PORT:-28080}
-export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-1}"
+# 默认关闭：减少 MQ/TCP 路径上的调试输出（需要排查 gate 时再 export VERL_EXCHANGE_DEBUG=1）
+export VERL_EXCHANGE_DEBUG="${VERL_EXCHANGE_DEBUG:-0}"
 export VLLM_USE_V1=${VLLM_USE_V1:-1}
 # 设备错配调试：默认开启，确保 optimizer/device mismatch 时能打印出具体 state/grad 的 device
 export VERL_OPT_DEVICE_DEBUG="${VERL_OPT_DEVICE_DEBUG:-1}"
@@ -23,7 +24,7 @@ export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"hlo16D6KKxblfDAgvGxVQ"}
 # SwanLab：可通过 PROJECT_NAME / EXPERIMENT_NAME 覆盖
 PROJECT_NAME="${PROJECT_NAME:-new_role_swap_2026.4}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-isolated_B}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-isolated_B_v1}"
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-0.5B-Instruct}"
 TRAIN_FILES="${TRAIN_FILES:-data/gsm8k/train.parquet}"
@@ -43,12 +44,14 @@ ADV_ESTIMATOR="${ADV_ESTIMATOR:-grpo}"
 USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-true}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((MAX_RESPONSE_LENGTH * 4))}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.4}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.35}"
 STALENESS_THRESHOLD="${STALENESS_THRESHOLD:-100}"
 TRIGGER_PARAM_SYNC_STEP="${TRIGGER_PARAM_SYNC_STEP:-1}"
 PARTIAL_ROLLOUT="${PARTIAL_ROLLOUT:-false}"
 TEST_FREQ="${TEST_FREQ:-1000}"
 NUM_RAY_GPUS="${NUM_RAY_GPUS:-1}"
+# 与 A 侧一致：多 AgentLoopWorker 并行打 vLLM（export AGENT_NUM_WORKERS=8 等可再拉高，OOM 则减小）
+AGENT_NUM_WORKERS="${AGENT_NUM_WORKERS:-6}"
 
 EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
 for i in $(seq 1 180); do
@@ -116,7 +119,7 @@ PYTHONUNBUFFERED=1 "$PYTHON_BIN" -m verl.experimental.fully_async_policy.fully_a
   actor_rollout_ref.rollout.response_length="${MAX_RESPONSE_LENGTH}" \
   actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS}" \
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
-  actor_rollout_ref.rollout.agent.num_workers=1 \
+  actor_rollout_ref.rollout.agent.num_workers="${AGENT_NUM_WORKERS}" \
   actor_rollout_ref.hybrid_engine=False \
   actor_rollout_ref.rollout.calculate_log_probs=True \
   actor_rollout_ref.rollout.checkpoint_engine.backend=naive \

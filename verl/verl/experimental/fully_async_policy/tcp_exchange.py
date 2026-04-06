@@ -24,7 +24,7 @@ Design goals:
 Protocol:
 - Each request is a length-prefixed (4 bytes big-endian) pickle payload:
   dict: {"op": str, "run_id": str, "payload": Any | None}
-  op in: "push_from_A", "push_from_B", "pull_for_A", "pull_for_B", "stats"
+  op in: "push_from_A", "push_from_B", "pull_for_A", "pull_for_B", "pull_batch_for_A", "pull_batch_for_B", "stats"
 
 - Each response is also length-prefixed pickle:
   dict: {"ok": bool, "result": Any, "error": str | None}
@@ -286,6 +286,34 @@ class TcpExchangeServer:
                     await _send(writer, {"ok": True, "result": (item, qlen_after), "error": None})
                     continue
 
+                if op in ("pull_batch_for_A", "pull_batch_for_B"):
+                    n_req = int((payload or {}).get("n", 1))
+                    n_req = max(1, min(n_req, st.max_queue_size))
+                    if op == "pull_batch_for_A":
+                        q = st.b_to_a
+                        consumed_k = "b_to_a_consumed"
+                    else:
+                        q = st.a_to_b
+                        consumed_k = "a_to_b_consumed"
+                    items_out = None
+                    qlen_after = 0
+                    async with st.cond:
+                        while True:
+                            if len(q) >= n_req:
+                                items_out = [q.popleft() for _ in range(n_req)]
+                                st.stats[consumed_k] += n_req
+                                qlen_after = len(q)
+                                break
+                            if len(q) > 0 and q[0] is None:
+                                item = q.popleft()
+                                st.stats[consumed_k] += 1
+                                items_out = [item]
+                                qlen_after = len(q)
+                                break
+                            await st.cond.wait()
+                    await _send(writer, {"ok": True, "result": (items_out, qlen_after), "error": None})
+                    continue
+
                 await _send(writer, {"ok": False, "result": None, "error": f"unknown op: {op}"})
         except (asyncio.IncompleteReadError, ConnectionResetError):
             return
@@ -332,7 +360,7 @@ class TcpExchangeClient:
           TimeoutError during normal operation.
         - We still keep a short connect timeout so a dead server fails fast.
         """
-        blocking_ops = {"wait_put", "wait_get", "pull_for_A", "pull_for_B"}
+        blocking_ops = {"wait_put", "wait_get", "pull_for_A", "pull_for_B", "pull_batch_for_A", "pull_batch_for_B"}
         _tcp_exchange_debug(
             f"request_sync ENTER side={self.side} run_id={self.run_id} {self.host}:{self.port} op={op} "
             f"blocking={op in blocking_ops}"
@@ -377,6 +405,13 @@ class TcpExchangeClient:
     def recv_from_peer_sync(self) -> tuple[Any | None, int]:
         item, qlen = self.request_sync(self._op_pull(), None)
         return item, int(qlen)
+
+    def recv_batch_from_peer_sync(self, n: int) -> tuple[list[Any], int]:
+        """一次 TCP 往返拉取 n 条（或遇终止哨兵 [None] 时提前返回）。"""
+        n = int(n)
+        op = "pull_batch_for_A" if self.side == "A" else "pull_batch_for_B"
+        items, qlen = self.request_sync(op, {"n": n})
+        return list(items), int(qlen)
 
     def send_to_peer_sync(self, sample: Any) -> bool:
         """Synchronous push (avoids asyncio.run in plain sync training loops)."""

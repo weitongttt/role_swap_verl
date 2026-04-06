@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import os
 import time
@@ -240,49 +241,138 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         Returns:
             tuple: (epoch, batch_dict, gen_batch_output)
         """
+        need = self.required_samples
         print(
-            f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
+            f"[FullyAsyncTrainer] MQ consumer active: waiting until incoming>={need} samples for this train step "
+            f"(background monitor prints queue depth periodically; disable with VERL_MQ_MONITOR=0)",
             flush=True,
         )
 
-        # Collect samples using a simple loop calling get_sample
         consumer_start = time.time()
-        queue_samples = []
+        queue_samples: list[Any] = []
         queue_len = 0
-        while len(queue_samples) < self.required_samples:
-            # Get a single sample and wait until there is a sample or None is received
-            dbg_raw = os.environ.get("VERL_EXCHANGE_DEBUG", "").strip().lower()
-            dbg_level = 0
-            if dbg_raw in ("true", "yes", "on"):
-                dbg_level = 2
-            else:
-                try:
-                    dbg_level = int(dbg_raw)
-                except ValueError:
-                    dbg_level = 0
 
-            if dbg_level >= 2:
+        use_batch = hasattr(self.message_queue_client, "get_samples_batch_sync")
+        mq = self.message_queue_client
+        stop_monitor = asyncio.Event()
+        enable_monitor = os.environ.get("VERL_MQ_MONITOR", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+
+        async def _mq_monitor_loop() -> None:
+            raw = os.environ.get("VERL_MQ_MONITOR_INTERVAL_S", "5").strip()
+            try:
+                interval = float(raw)
+            except ValueError:
+                interval = 5.0
+            interval = max(0.5, interval)
+            first = True
+            while not stop_monitor.is_set():
+                if not first:
+                    await asyncio.sleep(interval)
+                first = False
+                if stop_monitor.is_set():
+                    break
+                try:
+                    if hasattr(mq, "get_statistics") and asyncio.iscoroutinefunction(mq.get_statistics):
+                        stats = await mq.get_statistics()
+                    else:
+                        stats = await asyncio.to_thread(mq.get_statistics_sync)
+                    inc = stats.get("incoming_size", stats.get("queue_size", -1))
+                    out = stats.get("outgoing_size", -1)
+                    ready = isinstance(inc, int) and inc >= need
+                    print(
+                        f"[FullyAsyncTrainer] MQ monitor: incoming={inc} outgoing={out} need={need} "
+                        f"train_ready={ready}",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(f"[FullyAsyncTrainer] MQ monitor: stats failed: {e!r}", flush=True)
+
+        monitor_task = None
+        if enable_monitor:
+            monitor_task = asyncio.create_task(_mq_monitor_loop())
+
+        def _sync_collect_one_by_one() -> tuple[list[Any], int]:
+            samples: list[Any] = []
+            qlen = 0
+            while len(samples) < need:
+                dbg_raw = os.environ.get("VERL_EXCHANGE_DEBUG", "").strip().lower()
+                dbg_level = 0
+                if dbg_raw in ("true", "yes", "on"):
+                    dbg_level = 2
+                else:
+                    try:
+                        dbg_level = int(dbg_raw)
+                    except ValueError:
+                        dbg_level = 0
+
+                if dbg_level >= 2:
+                    print(
+                        f"[FullyAsyncTrainer][EXCHANGE_DEBUG] about to get_sample_sync "
+                        f"have={len(samples)}/{need}",
+                        flush=True,
+                    )
+                sample, qlen = mq.get_sample_sync()
+
+                if sample is None:
+                    print(
+                        f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
+                        f"Collected {len(samples)}/{need} samples"
+                    )
+                    break
+
+                samples.append(sample)
+
+                if len(samples) % 64 == 0:
+                    print(
+                        f"[FullyAsyncTrainer] Collected {len(samples)}/{need} samples. mq_len: {qlen}",
+                        flush=True,
+                    )
+            return samples, qlen
+
+        try:
+            if use_batch:
+                queue_samples, queue_len = await asyncio.to_thread(
+                    mq.get_samples_batch_sync,
+                    need,
+                )
+            else:
+                queue_samples, queue_len = await asyncio.to_thread(_sync_collect_one_by_one)
+        finally:
+            stop_monitor.set()
+            if monitor_task is not None:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
+
+        if use_batch:
+            if (len(queue_samples) == 1 and queue_samples[0] is None) or (
+                not queue_samples and queue_len == 0
+            ):
                 print(
-                    f"[FullyAsyncTrainer][EXCHANGE_DEBUG] about to get_sample_sync "
-                    f"have={len(queue_samples)}/{self.required_samples}",
+                    "[FullyAsyncTrainer] batch pull: empty or termination signal",
                     flush=True,
                 )
-            sample, queue_len = self.message_queue_client.get_sample_sync()
-
-            if sample is None:
+                return None, None
+            if any(x is None for x in queue_samples):
                 print(
-                    f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
-                    f"Collected {len(queue_samples)}/{self.required_samples} samples"
+                    f"[FullyAsyncTrainer] batch pull: got None inside batch, "
+                    f"len={len(queue_samples)}/{need}",
+                    flush=True,
                 )
-                break
-
-            queue_samples.append(sample)
-
-            if len(queue_samples) % 64 == 0:
+                return None, None
+            if len(queue_samples) < need:
                 print(
-                    f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. "
-                    f"mq_len: {queue_len}"
+                    f"[FullyAsyncTrainer] batch pull: incomplete {len(queue_samples)}/{need}",
+                    flush=True,
                 )
+                return None, None
 
         consumer_end = time.time()
 
@@ -291,11 +381,19 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             return None, None
         total_wait_time = consumer_end - consumer_start
 
-        print(
-            f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
-            f"total wait time: {total_wait_time:.2f} seconds. "
-            f"mq_len: {queue_len}"
-        )
+        if not use_batch:
+            print(
+                f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
+                f"total wait time: {total_wait_time:.2f} seconds. "
+                f"mq_len: {queue_len}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[FullyAsyncTrainer] Batch pull: {len(queue_samples)} samples in one round-trip, "
+                f"total wait time: {total_wait_time:.2f}s, mq_len: {queue_len}",
+                flush=True,
+            )
 
         queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
         # Assemble batch - now working directly with RolloutSample objects

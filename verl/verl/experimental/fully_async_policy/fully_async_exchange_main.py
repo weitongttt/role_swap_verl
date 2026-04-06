@@ -28,7 +28,7 @@ import socket
 import threading
 from dataclasses import dataclass
 from pprint import pprint
-from typing import Any, Literal
+from typing import Any, List, Literal, Tuple
 
 import hydra
 import ray
@@ -87,6 +87,46 @@ class ExchangeAsMessageQueueClient:
             self.exchange_client.gate_wait_get_sync()
         return self.exchange_client.recv_from_peer_sync()
 
+    def get_samples_batch_sync(self, n: int) -> Tuple[List[Any], int]:
+        """一次 gate_wait + 批量 pull，避免 trainer 逐条拉取时的 TCP 往返风暴。"""
+        n = int(n)
+        if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
+            self.exchange_client.gate_wait_get_sync()
+        if hasattr(self.exchange_client, "recv_batch_from_peer_sync"):
+            return self.exchange_client.recv_batch_from_peer_sync(n)
+        acc: List[Any] = []
+        qlen = 0
+        for _ in range(n):
+            item, qlen = self.exchange_client.recv_from_peer_sync()
+            acc.append(item)
+        return acc, qlen
+
+    def _statistics_with_compat(self, stats: dict[str, Any]) -> dict[str, Any]:
+        """与 sync 路径一致：把 TCP 原始 a_to_b/b_to_a 等映射为 incoming/outgoing/queue_size。"""
+        stats = dict(stats)
+        if self.exchange_client.side == "A":
+            incoming = int(stats.get("b_to_a_size", 0))
+            outgoing = int(stats.get("a_to_b_size", 0))
+            produced = stats.get("a_to_b_produced", 0)
+            consumed = stats.get("a_to_b_consumed", 0)
+            dropped = stats.get("a_to_b_dropped", 0)
+        else:
+            incoming = int(stats.get("a_to_b_size", 0))
+            outgoing = int(stats.get("b_to_a_size", 0))
+            produced = stats.get("b_to_a_produced", 0)
+            consumed = stats.get("b_to_a_consumed", 0)
+            dropped = stats.get("b_to_a_dropped", 0)
+
+        compat = {
+            "incoming_size": incoming,
+            "outgoing_size": outgoing,
+            "queue_size": outgoing,
+            "total_produced": produced,
+            "total_consumed": consumed,
+            "dropped_samples": dropped,
+        }
+        return {**stats, **compat}
+
     async def get_queue_size(self) -> int:
         stats = await self.get_statistics()
         # For side A: incoming is b_to_a_size; for side B: incoming is a_to_b_size.
@@ -97,38 +137,14 @@ class ExchangeAsMessageQueueClient:
         # otherwise offload the sync path to a thread to avoid blocking async actors.
         ec = self.exchange_client
         if hasattr(ec, "request_async"):
-            stats = await ec.request_async("stats", None)
-            # Keep return type consistent with sync path.
-            return dict(stats)
+            raw = await ec.request_async("stats", None)
+            # 必须与 get_statistics_sync 一样带上 compat，否则 async 调用方拿不到 incoming_size
+            return self._statistics_with_compat(dict(raw))
         return await asyncio.to_thread(self.get_statistics_sync)
 
     def get_statistics_sync(self) -> dict[str, Any]:
         stats = self.exchange_client.get_statistics_sync()
-        if self.exchange_client.side == "A":
-            incoming = stats.get("b_to_a_size", 0)
-            outgoing = stats.get("a_to_b_size", 0)
-            produced = stats.get("a_to_b_produced", 0)
-            consumed = stats.get("a_to_b_consumed", 0)
-            dropped = stats.get("a_to_b_dropped", 0)
-        else:
-            incoming = stats.get("a_to_b_size", 0)
-            outgoing = stats.get("b_to_a_size", 0)
-            produced = stats.get("b_to_a_produced", 0)
-            consumed = stats.get("b_to_a_consumed", 0)
-            dropped = stats.get("b_to_a_dropped", 0)
-
-        # Compatibility shim:
-        # FullyAsyncRollouter expects "queue_size" to reflect the queue it is producing into,
-        # and uses it for pause/backpressure decisions.
-        compat = {
-            "incoming_size": incoming,
-            "outgoing_size": outgoing,
-            "queue_size": outgoing,
-            "total_produced": produced,
-            "total_consumed": consumed,
-            "dropped_samples": dropped,
-        }
-        return {**stats, **compat}
+        return self._statistics_with_compat(stats)
 
     async def clear_queue(self):
         # Exchange queue does not currently support clear; no-op for compatibility.

@@ -208,7 +208,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
+            _conc_mult = int(self.config.async_training.get("rollout_concurrent_multiplier", 32))
+            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * _conc_mult
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
@@ -218,6 +219,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"max_queue_size: {self.max_queue_size} "
                 f"total_train_steps: {self.total_train_steps} "
                 f"total_rollout_steps: {self.total_rollout_steps} "
+                f"rollout_concurrent_multiplier: {_conc_mult} "
                 f"max_concurrent_samples: {self.max_concurrent_samples} "
             )
 
@@ -768,6 +770,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         """Determine whether the build should be paused"""
         queue_stats = self.message_queue_client.get_statistics_sync()
         queue_size = queue_stats["queue_size"]
+        incoming = int(queue_stats.get("incoming_size", 0))
 
         # Exchange cross-feed mode: staleness-based pausing can deadlock because this rollouter
         # depends on *its own* trainer to reset staleness, while its trainer depends on the peer
@@ -778,6 +781,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         if exchange_cfg is not None:
             pause_on_staleness = bool(getattr(exchange_cfg, "pause_on_staleness", False))
 
+        # Outgoing (本侧->对侧) 背压：队列满则必须停，避免撑爆 exchange
         if queue_size >= self.max_queue_size:
             if not self.paused:
                 print(
@@ -785,6 +789,21 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                     f"due to full queue: size={queue_size}, max={self.max_queue_size}"
                 )
             return True
+
+        # Isolated A/B：incoming = 对侧->本侧（A 侧为 B->A，B 侧为 A->B）。
+        # 当 incoming < required_samples 时持续推理并 push 到对侧；incoming >= required_samples 时暂停 rollout，
+        # 让本侧 trainer 从 incoming 拉够一批再训练（与 ppo_mini_batch_size*require_batches 对齐）。
+        if exchange_cfg is not None and bool(getattr(exchange_cfg, "rollout_pause_when_incoming_ready", True)):
+            if incoming >= self.required_samples:
+                if not self.paused:
+                    print(
+                        "[FullyAsyncRollouter][ShouldPause] exchange incoming "
+                        f"{incoming} >= required_samples {self.required_samples} "
+                        "-> pause rollout for trainer",
+                        flush=True,
+                    )
+                return True
+            return False
 
         if pause_on_staleness and self.staleness_samples >= self.max_required_samples:
             if not self.paused:
@@ -804,7 +823,8 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # monitor stats
             "monitor/active_tasks_size": len(self.active_tasks),
             "monitor/queue/pending_queue_size": self.pending_queue.qsize(),
-            "monitor/queue/mq_queue_size": queue_stats["queue_size"],
+            "monitor/queue/mq_outgoing_size": queue_stats["queue_size"],
+            "monitor/queue/mq_incoming_size": queue_stats.get("incoming_size", 0),
             # counting stats
             "count/total_generated_samples": self.total_generated_samples,
             "count/staleness_samples": self.staleness_samples,

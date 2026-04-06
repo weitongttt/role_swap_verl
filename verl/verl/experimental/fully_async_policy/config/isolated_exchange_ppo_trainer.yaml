@@ -15,6 +15,8 @@ async_training:
   require_batches: 1
   partial_rollout: True
   use_trainer_do_validate: False
+  # max_concurrent_samples = len(vLLM server_handles) * rollout_concurrent_multiplier（上限仍受 max_required_samples 约束）
+  rollout_concurrent_multiplier: 32
 
 rollout:
   nnodes: 1
@@ -53,3 +55,5 @@ exchange:
   max_queue_size: 20000
   enable_gate: true
   bootstrap_b_pause_rollouter: true
+  # incoming（对侧->本侧）>= ppo_mini_batch_size*require_batches 时暂停 rollout，供本侧 trainer 消费；不足时持续推理并 push 到对侧
+  rollout_pause_when_incoming_ready: true

@@ -385,6 +385,34 @@ class BidirectionalExchangeQueue:
         """
         return await self._pull("A2B")
 
+    async def _pull_batch(self, direction: str, n: int) -> tuple[list[Any], int]:
+        n = max(1, min(int(n), self.max_queue_size))
+        async with self._lock:
+            if direction == "A2B":
+                queue = self._a_to_b
+                consumed_key = "a_to_b_consumed"
+            else:
+                queue = self._b_to_a
+                consumed_key = "b_to_a_consumed"
+            while True:
+                if len(queue) >= n:
+                    items = [queue.popleft() for _ in range(n)]
+                    self._stats[consumed_key] += n
+                    return items, len(queue)
+                if len(queue) > 0 and queue[0] is None:
+                    item = queue.popleft()
+                    self._stats[consumed_key] += 1
+                    return [item], len(queue)
+                await self._cond.wait()
+
+    async def pull_batch_for_A(self, n: int) -> tuple[list[Any], int]:
+        """Batch pull for side A (B->A queue)."""
+        return await self._pull_batch("B2A", n)
+
+    async def pull_batch_for_B(self, n: int) -> tuple[list[Any], int]:
+        """Batch pull for side B (A->B queue)."""
+        return await self._pull_batch("A2B", n)
+
     async def get_statistics(self) -> dict[str, Any]:
         async with self._lock:
             return {
@@ -441,6 +469,11 @@ class BidirectionalExchangeClient:
         if self.side == "A":
             return ray.get(self.queue_actor.pull_for_A.remote())
         return ray.get(self.queue_actor.pull_for_B.remote())
+
+    def recv_batch_from_peer_sync(self, n: int) -> tuple[list[Any], int]:
+        if self.side == "A":
+            return ray.get(self.queue_actor.pull_batch_for_A.remote(n))
+        return ray.get(self.queue_actor.pull_batch_for_B.remote(n))
 
     def get_statistics_sync(self) -> dict[str, Any]:
         return ray.get(self.queue_actor.get_statistics.remote())
