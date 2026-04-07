@@ -657,9 +657,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 f"[FullyAsyncRollouter][EXCHANGE_DEBUG] put_sample id={rollout_sample.sample_id} exchange.side={s}",
                 flush=True,
             )
-        success = await self.message_queue_client.put_sample(
-            sample=ray.cloudpickle.dumps(rollout_sample),
-        )
+        sample_blob = ray.cloudpickle.dumps(rollout_sample)
+        success = await self.message_queue_client.put_sample(sample=sample_blob)
+        # Keep local mirror copy at the per-sample async push site (best-effort).
+        # This is intentionally colocated with per-item push logic for clarity.
+        if success:
+            try:
+                exchange_client = getattr(self.message_queue_client, "exchange_client", None)
+                if exchange_client is not None and hasattr(exchange_client, "send_to_local"):
+                    await exchange_client.send_to_local(sample_blob)
+            except Exception:
+                pass
         if success:
             self.total_generated_samples += 1
         else:

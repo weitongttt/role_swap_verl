@@ -152,6 +152,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         self.require_batches = config.async_training.require_batches
         train_need = int(config.actor_rollout_ref.actor.ppo_mini_batch_size) * int(self.require_batches)
         gen_bsz = int(config.data.gen_batch_size)
+        exchange_cfg = getattr(config, "exchange", None)
         if hasattr(config, "exchange"):
             self.required_samples = int(math.ceil(train_need / max(1, gen_bsz)))
         else:
@@ -161,6 +162,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             + config.rollout.nnodes * config.rollout.n_gpus_per_node
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
+        self.exchange_side = str(getattr(exchange_cfg, "side", "A")).upper() if exchange_cfg is not None else "A"
+        self._skip_local_first_step = self.exchange_side == "B"
 
         # use trainer to do validation
         if self.config.async_training.use_trainer_do_validate:
@@ -258,8 +261,10 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         consumer_start = time.time()
         queue_samples: list[Any] = []
         queue_len = 0
+        used_local_batch_this_step = False
 
         use_batch = hasattr(self.message_queue_client, "get_samples_batch_sync")
+        use_local_batch = hasattr(self.message_queue_client, "get_local_samples_batch_sync")
         mq = self.message_queue_client
         exchange_cfg = getattr(self.config, "exchange", None)
         if exchange_cfg is not None and not use_batch:
@@ -352,6 +357,17 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                     mq.get_samples_batch_sync,
                     need,
                 )
+                # Combine one local batch with MQ batch on every step, except B's first step.
+                if use_local_batch:
+                    if self._skip_local_first_step:
+                        self._skip_local_first_step = False
+                    else:
+                        local_samples, _ = await asyncio.to_thread(
+                            mq.get_local_samples_batch_sync,
+                            need,
+                        )
+                        queue_samples.extend(local_samples)
+                        used_local_batch_this_step = True
             else:
                 queue_samples, queue_len = await asyncio.to_thread(_sync_collect_one_by_one)
         finally:
@@ -388,7 +404,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         consumer_end = time.time()
 
-        if not queue_samples or len(queue_samples) < self.required_samples:
+        min_need = self.required_samples * (2 if used_local_batch_this_step else 1)
+        if not queue_samples or len(queue_samples) < min_need:
             print("[FullyAsyncTrainer] not enough samples collected after loop")
             return None, None
         total_wait_time = consumer_end - consumer_start

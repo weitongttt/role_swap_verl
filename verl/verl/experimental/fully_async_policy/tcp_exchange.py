@@ -120,6 +120,8 @@ class _RunState:
     max_queue_size: int
     a_to_b: deque
     b_to_a: deque
+    local_a: deque
+    local_b: deque
     cond: asyncio.Condition
     stats: dict[str, int]
     allow_put: dict[str, bool]
@@ -147,6 +149,8 @@ class TcpExchangeServer:
                 max_queue_size=self.default_max_queue_size,
                 a_to_b=deque(maxlen=self.default_max_queue_size),
                 b_to_a=deque(maxlen=self.default_max_queue_size),
+                local_a=deque(maxlen=self.default_max_queue_size),
+                local_b=deque(maxlen=self.default_max_queue_size),
                 cond=cond,
                 stats=defaultdict(int),
                 allow_put={"A": False, "B": False},
@@ -178,6 +182,8 @@ class TcpExchangeServer:
                             "max_queue_size": st.max_queue_size,
                             "a_to_b_size": len(st.a_to_b),
                             "b_to_a_size": len(st.b_to_a),
+                            "local_a_size": len(st.local_a),
+                            "local_b_size": len(st.local_b),
                             "allow_put": dict(st.allow_put),
                             "allow_get": dict(st.allow_get),
                             "active_put": st.active_put,
@@ -193,6 +199,8 @@ class TcpExchangeServer:
                     async with st.cond:
                         st.a_to_b.clear()
                         st.b_to_a.clear()
+                        st.local_a.clear()
+                        st.local_b.clear()
                         st.stats.clear()
                         st.active_put = "A"
                         st.active_get = "B"
@@ -268,6 +276,25 @@ class TcpExchangeServer:
                     await _send(writer, {"ok": True, "result": (not dropped), "error": None})
                     continue
 
+                if op in ("push_local_A", "push_local_B"):
+                    async with st.cond:
+                        if op == "push_local_A":
+                            q = st.local_a
+                            produced_k, dropped_k = "local_a_produced", "local_a_dropped"
+                        else:
+                            q = st.local_b
+                            produced_k, dropped_k = "local_b_produced", "local_b_dropped"
+                        dropped = False
+                        if len(q) >= st.max_queue_size:
+                            q.popleft()
+                            st.stats[dropped_k] += 1
+                            dropped = True
+                        q.append(payload)
+                        st.stats[produced_k] += 1
+                        st.cond.notify_all()
+                    await _send(writer, {"ok": True, "result": (not dropped), "error": None})
+                    continue
+
                 if op in ("pull_for_A", "pull_for_B"):
                     # 禁止在持有 st.cond 时 await _send：大 payload 会长时间占锁，阻塞对侧 push，
                     # 多连接下易出现极端饥饿甚至表现为「pull 永远等不到数据」（与 push 抢同一把锁）。
@@ -314,6 +341,26 @@ class TcpExchangeServer:
                     await _send(writer, {"ok": True, "result": (items_out, qlen_after), "error": None})
                     continue
 
+                if op in ("pull_local_batch_for_A", "pull_local_batch_for_B"):
+                    n_req = int((payload or {}).get("n", 1))
+                    n_req = max(1, min(n_req, st.max_queue_size))
+                    if op == "pull_local_batch_for_A":
+                        q = st.local_a
+                        consumed_k = "local_a_consumed"
+                    else:
+                        q = st.local_b
+                        consumed_k = "local_b_consumed"
+                    items_out = None
+                    qlen_after = 0
+                    async with st.cond:
+                        while len(q) < n_req:
+                            await st.cond.wait()
+                        items_out = [q.popleft() for _ in range(n_req)]
+                        st.stats[consumed_k] += n_req
+                        qlen_after = len(q)
+                    await _send(writer, {"ok": True, "result": (items_out, qlen_after), "error": None})
+                    continue
+
                 await _send(writer, {"ok": False, "result": None, "error": f"unknown op: {op}"})
         except (asyncio.IncompleteReadError, ConnectionResetError):
             return
@@ -349,6 +396,9 @@ class TcpExchangeClient:
 
     def _op_pull(self) -> str:
         return "pull_for_A" if self.side == "A" else "pull_for_B"
+
+    def _op_push_local(self) -> str:
+        return "push_local_A" if self.side == "A" else "push_local_B"
 
     def request_sync(self, op: str, payload: Any | None = None) -> Any:
         """
@@ -398,6 +448,9 @@ class TcpExchangeClient:
     async def send_to_peer(self, sample: Any) -> bool:
         return bool(await self.request_async(self._op_push(), sample))
 
+    async def send_to_local(self, sample: Any) -> bool:
+        return bool(await self.request_async(self._op_push_local(), sample))
+
     async def recv_from_peer(self) -> tuple[Any | None, int]:
         item, qlen = await self.request_async(self._op_pull(), None)
         return item, int(qlen)
@@ -413,9 +466,20 @@ class TcpExchangeClient:
         items, qlen = self.request_sync(op, {"n": n})
         return list(items), int(qlen)
 
+    def recv_local_batch_sync(self, n: int) -> tuple[list[Any], int]:
+        """一次 TCP 往返拉取本地镜像队列 n 条。"""
+        n = int(n)
+        op = "pull_local_batch_for_A" if self.side == "A" else "pull_local_batch_for_B"
+        items, qlen = self.request_sync(op, {"n": n})
+        return list(items), int(qlen)
+
     def send_to_peer_sync(self, sample: Any) -> bool:
         """Synchronous push (avoids asyncio.run in plain sync training loops)."""
         return bool(self.request_sync(self._op_push(), sample))
+
+    def send_to_local_sync(self, sample: Any) -> bool:
+        """Synchronous local mirror push."""
+        return bool(self.request_sync(self._op_push_local(), sample))
 
     def recv_from_peer_sync_with_timeout(self, timeout_s: float) -> tuple[Any | None, int]:
         timeout_s = float(timeout_s)

@@ -101,18 +101,26 @@ class ExchangeAsMessageQueueClient:
             acc.append(item)
         return acc, qlen
 
+    def get_local_samples_batch_sync(self, n: int) -> Tuple[List[Any], int]:
+        n = int(n)
+        if hasattr(self.exchange_client, "recv_local_batch_sync"):
+            return self.exchange_client.recv_local_batch_sync(n)
+        return [], 0
+
     def _statistics_with_compat(self, stats: dict[str, Any]) -> dict[str, Any]:
         """与 sync 路径一致：把 TCP 原始 a_to_b/b_to_a 等映射为 incoming/outgoing/queue_size。"""
         stats = dict(stats)
         if self.exchange_client.side == "A":
             incoming = int(stats.get("b_to_a_size", 0))
             outgoing = int(stats.get("a_to_b_size", 0))
+            local_size = int(stats.get("local_a_size", 0))
             produced = stats.get("a_to_b_produced", 0)
             consumed = stats.get("a_to_b_consumed", 0)
             dropped = stats.get("a_to_b_dropped", 0)
         else:
             incoming = int(stats.get("a_to_b_size", 0))
             outgoing = int(stats.get("b_to_a_size", 0))
+            local_size = int(stats.get("local_b_size", 0))
             produced = stats.get("b_to_a_produced", 0)
             consumed = stats.get("b_to_a_consumed", 0)
             dropped = stats.get("b_to_a_dropped", 0)
@@ -121,6 +129,7 @@ class ExchangeAsMessageQueueClient:
             "incoming_size": incoming,
             "outgoing_size": outgoing,
             "queue_size": outgoing,
+            "local_size": local_size,
             "total_produced": produced,
             "total_consumed": consumed,
             "dropped_samples": dropped,

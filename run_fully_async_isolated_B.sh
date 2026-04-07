@@ -24,7 +24,7 @@ export RAY_DEDUP_LOGS=0
 export SWANLAB_API_KEY="hlo16D6KKxblfDAgvGxVQ"
 # SwanLab
 PROJECT_NAME="new_role_swap_2026.4"
-EXPERIMENT_NAME="isolated_B_v2.1"
+EXPERIMENT_NAME="isolated_B_v4"
 
 MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
 TRAIN_FILES="data/gsm8k/train.parquet"
