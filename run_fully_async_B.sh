@@ -17,8 +17,8 @@ export VLLM_USE_V1=${VLLM_USE_V1:-1}
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 
 # CPU 绑核隔离（B 用 32-63）
-export CPUSET_B=${CPUSET_B:-30-59}
-export RAY_NUM_CPUS_B=${RAY_NUM_CPUS_B:-30}
+export CPUSET_B=${CPUSET_B:-28-55}
+export RAY_NUM_CPUS_B=${RAY_NUM_CPUS_B:-28}
 
 # 确保找得到 ray（B 不启动 head，但会依赖 ray.init 连接集群）
 RAY_BIN="${RAY_BIN:-}"

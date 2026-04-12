@@ -18,8 +18,8 @@ export VLLM_USE_V1=${VLLM_USE_V1:-1}
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 
 # CPU 绑核隔离（A 用 0-29）
-export CPUSET_A=${CPUSET_A:-0-29}
-export RAY_NUM_CPUS_A=${RAY_NUM_CPUS_A:-30}
+export CPUSET_A=${CPUSET_A:-0-27}
+export RAY_NUM_CPUS_A=${RAY_NUM_CPUS_A:-28}
 
 # 固定用同一个本机 Ray 集群（由 A 启动 head）
 RAY_BIN="${RAY_BIN:-}"
