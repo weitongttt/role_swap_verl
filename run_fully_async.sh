@@ -21,7 +21,7 @@ fi
 
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
-val_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
 model_path="Qwen3-1.7B"
 
 # 训练参数
@@ -67,6 +67,7 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.e
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
+    trainer.val_before_train=False \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
     trainer.save_freq=50 \
@@ -85,4 +86,5 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.e
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
+    actor_rollout_ref.actor.fsdp_config.model_dtype="bfloat16" \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size} \

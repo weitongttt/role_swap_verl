@@ -174,8 +174,8 @@ cd /zhangshihao/weitong/verl_dev/
 # 终端 1: TCP exchange server
 python -m verl.experimental.fully_async_policy.tcp_exchange_server_main
 # 终端 2: Side A (GPU 0,1)
-bash run_ccrn_A.sh 2>&1 | tee ccrna_0402.log
+bash run_fully_async_A.sh 2>&1 | tee fully_async_A_0412.log
 # 终端 3: Side B (GPU 2,3)
-bash run_ccrn_B.sh 2>&1 | tee ccrnb_0402.log
+bash run_fully_async_B.sh 2>&1 | tee fully_async_B_0412.log
 
 ```
