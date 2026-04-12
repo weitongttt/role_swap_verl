@@ -22,7 +22,7 @@ fi
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/train.parquet"
-model_path="Qwen/Qwen2.5-0.5B-Instruct"
+model_path="Qwen3-1.7B"
 
 # 训练参数
 train_prompt_bsz=0
@@ -41,8 +41,8 @@ trigger_parameter_sync_step=1 # 对齐 A 的同步频率
 partial_rollout=false # 中断生成
 
 # 实验名
-project_name="role_swap_baseline"
-experiment_name="baseline_2gpu_run"
+project_name="qwen3_1_7b"
+experiment_name="baseline_2gpu_g4"
 
 
 PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.experimental.fully_async_policy.fully_async_main \
@@ -52,6 +52,7 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.e
     data.gen_batch_size=${gen_prompt_bsz} \
     data.return_raw_chat=${return_raw_chat} \
     data.shuffle=True \
+    data.seed=99 \
     data.max_response_length=${max_response_length} \
     actor_rollout_ref.model.path=${model_path} \
     algorithm.adv_estimator=${adv_estimator} \
@@ -80,7 +81,7 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.e
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.partial_rollout="${partial_rollout}" \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \

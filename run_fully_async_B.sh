@@ -47,7 +47,7 @@ rollout_name="vllm"
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/train.parquet"
-model_path="Qwen/Qwen2.5-0.5B-Instruct"
+model_path="Qwen3-1.7B"
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
@@ -65,8 +65,8 @@ staleness_threshold=3
 trigger_parameter_sync_step=1
 partial_rollout=false
 
-project_name="gap_grpo"
-experiment_name="test_0323_gap_grpo_B"
+project_name="qwen3_1_7b"
+experiment_name="synced0412b"
 
 # 等待 A 写入 exchange.run_id 文件，避免 A/B 用到不同通道
 EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
@@ -127,7 +127,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     +exchange.port="${EXCHANGE_PORT}" \
     +exchange.enable_group_merge=true \
     +exchange.expected_per_hash=2 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
