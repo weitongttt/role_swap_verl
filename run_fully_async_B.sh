@@ -61,7 +61,7 @@ mini_batch_size=320  # GAP-GRPO: 消耗 A 和 B 汇总的样本量 (160+160)
 require_batches=1
 test_freq=1000
 
-staleness_threshold=100
+staleness_threshold=3
 trigger_parameter_sync_step=1
 partial_rollout=false
 
@@ -90,6 +90,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     data.return_raw_chat=${return_raw_chat:-True} \
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V1=\"${VLLM_USE_V1}\"" \
     data.shuffle=True \
+    data.seed=99 \
     data.max_response_length=${max_response_length} \
     actor_rollout_ref.model.path=${model_path} \
     algorithm.adv_estimator=${adv_estimator} \
@@ -124,6 +125,8 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     +exchange.backend=tcp \
     +exchange.host="${EXCHANGE_HOST}" \
     +exchange.port="${EXCHANGE_PORT}" \
+    +exchange.enable_group_merge=true \
+    +exchange.expected_per_hash=2 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \

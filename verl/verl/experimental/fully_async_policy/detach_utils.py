@@ -38,6 +38,12 @@ class RolloutSample:
     # Processing metadata
     rollout_status: dict[str, Any]
 
+    # Prompt hash for cross-side group merging (Phase 2: GAP-GRPO large group).
+    # Computed from the prompt input_ids before rollout so that A and B agree on
+    # the same hash for the same prompt (given identical seed / shuffle order).
+    # Empty string means "no group merge" (pass-through behaviour).
+    prompt_hash: str = ""
+
 
 @dataclass
 class ValidateMetrics:

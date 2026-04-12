@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import hashlib
 import multiprocessing
 import os
 import time
@@ -37,6 +38,37 @@ from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
+
+
+def _compute_prompt_hash(full_batch) -> str:
+    """Compute a short MD5 hash of the first row's input_ids for prompt identification.
+
+    Both sides (A and B) use the same seed and dataset order, so they produce
+    identical input_ids for the same step, giving identical hashes.  The hash
+    is embedded in RolloutSample and later written into non_tensor_batch so that
+    the trainer-side GroupMergeMQClient can group matching samples into one large
+    GRPO group (Phase 2: GAP-GRPO large group).
+
+    IMPORTANT: gen_batch_size is always 1 in fully-async mode, so each
+    RolloutSample contains exactly ONE prompt (repeated n times via DataProto.repeat).
+    We therefore hash input_ids[0] which corresponds to that single prompt.
+    The printed token_len helps verify we are hashing a single prompt, not a batch.
+    """
+    try:
+        ids = full_batch.batch["input_ids"][0]  # shape (max_len,); single prompt tokens
+        raw = ids.numpy().tobytes()
+        h = hashlib.md5(raw).hexdigest()[:16]
+        token_len = int((full_batch.batch.get("attention_mask", ids.unsqueeze(0))[0]).sum().item())
+        print(
+            f"[prompt_hash] hash={h} token_len={token_len} "
+            f"batch_size={len(full_batch)} "
+            f"(batch_size should equal rollout.n)"
+        )
+        return h
+    except Exception as exc:
+        # Graceful fallback: no merge for this sample.
+        print(f"[_compute_prompt_hash] failed ({exc}), falling back to empty hash")
+        return ""
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)
@@ -428,6 +460,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 sample_id=sample_id,
                 epoch=epoch,
                 rollout_status={},
+                prompt_hash=_compute_prompt_hash(full_batch),
             )
 
             await self.pending_queue.put(rollout_sample)
@@ -521,6 +554,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         rollout_sample.full_batch = ret
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
             [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
+        )
+        # Write prompt_hash and source_side into non_tensor_batch.
+        # source_side lets GroupMergeMQClient log which physical side produced each sample.
+        exchange_cfg = getattr(self.config, "exchange", None)
+        source_side = str(getattr(exchange_cfg, "side", "?")) if exchange_cfg else "?"
+        if rollout_sample.prompt_hash:
+            rollout_sample.full_batch.non_tensor_batch["prompt_hash"] = np.array(
+                [rollout_sample.prompt_hash] * len(rollout_sample.full_batch), dtype=object
+            )
+        rollout_sample.full_batch.non_tensor_batch["source_side"] = np.array(
+            [source_side] * len(rollout_sample.full_batch), dtype=object
         )
         rollout_sample.rollout_status = await self.get_statistics()
 
