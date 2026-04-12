@@ -41,43 +41,32 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 
 def _compute_prompt_hash(batch_dict) -> str:
-    """Compute a short MD5 hash of the prompt input_ids for matching across sides.
+    """Compute a short MD5 hash of the prompt text for matching across A/B sides.
 
-    Takes the raw batch_dict from the dataloader (before prepare_single_generation_data)
-    so that we hash the original tokenized prompt, not the post-rollout full sequence.
-
-    Both sides (A and B) use the same seed and dataset order, so they produce
-    identical input_ids for the same step, giving identical hashes.  The hash
-    is stored in RolloutSample.prompt_hash and later written into non_tensor_batch
-    so that the trainer-side GroupMergeMQClient can group matching samples into one
-    large GRPO group (Phase 2: GAP-GRPO large group).
-
-    IMPORTANT: batch_dict here is the SINGLE-item dict from the dataloader
-    (gen_batch_size=1), so input_ids is one prompt row, not a full batch.
+    batch_dict is a DataProto whose tensor batch only contains a dummy_tensor
+    placeholder (real tokenization happens inside generate_sequences_single).
+    The actual prompt content lives in non_tensor_batch fields such as 'prompt'.
+    We hash the prompt text, which is identical on both sides when the same seed
+    and dataset order are used (Phase 2: GAP-GRPO large group).
     """
     try:
-        ids = batch_dict["input_ids"]
-        # batch_dict["input_ids"] may be shape (1, seq_len) or (seq_len,)
-        if hasattr(ids, "squeeze"):
-            ids = ids.squeeze(0) if ids.dim() > 1 else ids
-        raw = ids.numpy().tobytes()
+        # batch_dict["prompt"] accesses non_tensor_batch["prompt"] via DataProto.__getitem__
+        prompt = batch_dict["prompt"]
+        # prompt may be a list/array with one element (gen_batch_size=1)
+        if isinstance(prompt, (list, tuple)):
+            prompt = prompt[0]
+        if hasattr(prompt, "item"):  # numpy scalar
+            prompt = prompt.item()
+        prompt_str = str(prompt)
+        raw = prompt_str.encode("utf-8")
         h = hashlib.md5(raw).hexdigest()[:16]
-        # attention_mask may also be in batch_dict
-        attn = batch_dict.get("attention_mask", None)
-        if attn is not None:
-            if hasattr(attn, "squeeze"):
-                attn = attn.squeeze(0) if attn.dim() > 1 else attn
-            token_len = int(attn.sum().item())
-        else:
-            token_len = len(ids)
         print(
-            f"[prompt_hash] hash={h} token_len={token_len} "
-            f"(hashing raw prompt from dataloader, pre-rollout)"
+            f"[prompt_hash] hash={h} prompt_len={len(prompt_str)} "
+            f"(hashing prompt text from dataloader)"
         )
         return h
     except Exception as exc:
-        # Graceful fallback: no merge for this sample.
-        # Print available keys so we can identify the correct key name.
+        # Print available keys to diagnose further mismatches.
         try:
             if hasattr(batch_dict, "keys"):
                 avail = list(batch_dict.keys())
