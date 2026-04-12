@@ -163,6 +163,15 @@ def assemble_batch_from_rollout_samples(
     if "response_mask" not in final_batch.batch.keys():
         final_batch.batch["response_mask"] = compute_response_mask(final_batch)
 
+    # Logging block: verify group sizes based on uid
+    if "uid" in final_batch.non_tensor_batch:
+        from collections import Counter
+        uids = final_batch.non_tensor_batch["uid"]
+        uid_counts = Counter(uids)
+        counts = list(uid_counts.values())
+        print(f"[BatchUtils] Final batch has {len(counts)} unique UIDs. Group sizes: min={min(counts)}, max={max(counts)}, avg={sum(counts)/len(counts):.2f}")
+
+
     if balance_batch:
         balance_batch(final_batch, metrics={})
 

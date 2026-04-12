@@ -563,8 +563,10 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         # Calling asynchronous generation methods
         ret = await self.async_rollout_manager.generate_sequences_single(rollout_sample.full_batch)
         rollout_sample.full_batch = ret
+        # Use prompt_hash for uid if available, so side A and B exactly match in GRPO advantage grouping.
+        base_uid = rollout_sample.prompt_hash if rollout_sample.prompt_hash else rollout_sample.sample_id
         rollout_sample.full_batch.non_tensor_batch["uid"] = np.array(
-            [f"uid_{rollout_sample.sample_id}"] * len(rollout_sample.full_batch), dtype=object
+            [f"uid_{base_uid}"] * len(rollout_sample.full_batch), dtype=object
         )
         # Write prompt_hash and source_side into non_tensor_batch.
         # source_side lets GroupMergeMQClient log which physical side produced each sample.
