@@ -40,34 +40,44 @@ from verl.utils.profiler import marked_timer
 from verl.utils.tracking import ValidationGenerationsLogger
 
 
-def _compute_prompt_hash(full_batch) -> str:
-    """Compute a short MD5 hash of the first row's input_ids for prompt identification.
+def _compute_prompt_hash(batch_dict) -> str:
+    """Compute a short MD5 hash of the prompt input_ids for matching across sides.
+
+    Takes the raw batch_dict from the dataloader (before prepare_single_generation_data)
+    so that we hash the original tokenized prompt, not the post-rollout full sequence.
 
     Both sides (A and B) use the same seed and dataset order, so they produce
     identical input_ids for the same step, giving identical hashes.  The hash
-    is embedded in RolloutSample and later written into non_tensor_batch so that
-    the trainer-side GroupMergeMQClient can group matching samples into one large
-    GRPO group (Phase 2: GAP-GRPO large group).
+    is stored in RolloutSample.prompt_hash and later written into non_tensor_batch
+    so that the trainer-side GroupMergeMQClient can group matching samples into one
+    large GRPO group (Phase 2: GAP-GRPO large group).
 
-    IMPORTANT: gen_batch_size is always 1 in fully-async mode, so each
-    RolloutSample contains exactly ONE prompt (repeated n times via DataProto.repeat).
-    We therefore hash input_ids[0] which corresponds to that single prompt.
-    The printed token_len helps verify we are hashing a single prompt, not a batch.
+    IMPORTANT: batch_dict here is the SINGLE-item dict from the dataloader
+    (gen_batch_size=1), so input_ids is one prompt row, not a full batch.
     """
     try:
-        ids = full_batch.batch["input_ids"][0]  # shape (max_len,); single prompt tokens
+        ids = batch_dict["input_ids"]
+        # batch_dict["input_ids"] may be shape (1, seq_len) or (seq_len,)
+        if hasattr(ids, "squeeze"):
+            ids = ids.squeeze(0) if ids.dim() > 1 else ids
         raw = ids.numpy().tobytes()
         h = hashlib.md5(raw).hexdigest()[:16]
-        token_len = int((full_batch.batch.get("attention_mask", ids.unsqueeze(0))[0]).sum().item())
+        # attention_mask may also be in batch_dict
+        attn = batch_dict.get("attention_mask", None)
+        if attn is not None:
+            if hasattr(attn, "squeeze"):
+                attn = attn.squeeze(0) if attn.dim() > 1 else attn
+            token_len = int(attn.sum().item())
+        else:
+            token_len = len(ids)
         print(
             f"[prompt_hash] hash={h} token_len={token_len} "
-            f"batch_size={len(full_batch)} "
-            f"(batch_size should equal rollout.n)"
+            f"(hashing raw prompt from dataloader, pre-rollout)"
         )
         return h
     except Exception as exc:
         # Graceful fallback: no merge for this sample.
-        print(f"[_compute_prompt_hash] failed ({exc}), falling back to empty hash")
+        print(f"[_compute_prompt_hash] failed ({exc!r}), falling back to empty hash")
         return ""
 
 
@@ -460,7 +470,9 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
                 sample_id=sample_id,
                 epoch=epoch,
                 rollout_status={},
-                prompt_hash=_compute_prompt_hash(full_batch),
+                # Compute hash from the raw batch_dict (has real input_ids from dataloader).
+                # full_batch at this point only has a dummy_tensor placeholder.
+                prompt_hash=_compute_prompt_hash(batch_dict),
             )
 
             await self.pending_queue.put(rollout_sample)
