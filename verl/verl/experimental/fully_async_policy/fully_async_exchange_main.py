@@ -27,7 +27,6 @@ import os
 import socket
 import threading
 import time
-from collections import deque, defaultdict
 from dataclasses import dataclass
 from pprint import pprint
 from typing import Any, Literal
@@ -67,7 +66,7 @@ class ExchangeAsMessageQueueClient:
         self.exchange_client = exchange_client
         self.enable_gate = bool(enable_gate)
 
-    async def put_sample(self, sample: Any) -> bool:
+    async def put_sample(self, sample: Any, prompt_hash: str = "") -> bool:
         # Gate: only rollouter put is expected to call put_sample
         if self.enable_gate and hasattr(self.exchange_client, "gate_wait_put_sync"):
             self.exchange_client.gate_wait_put_sync()
@@ -141,209 +140,96 @@ class ExchangeAsMessageQueueClient:
 
 
 class GroupMergeMQClient:
-    """Trainer-side MQ client wrapper that merges rollout samples from two sides
-    (A's own rollouter + B's rollouter) for the same prompt into a single large
-    GRPO group before handing the merged sample to the trainer.
+    """Unified MQ client for hash-grouped TCP exchange (GAP-GRPO).
 
-    Design (Phase 2 – GAP-GRPO large group):
-    - The TCP server already fans-out every push_from_A into both a_to_b AND a_to_a,
-      and every push_from_B into both b_to_a AND b_to_b.  pull_for_A therefore
-      alternates between a_to_a (own rollouts) and b_to_a (peer rollouts).
-    - GroupMergeMQClient accumulates samples in a dict keyed by prompt_hash until
-      `expected_per_hash` samples have arrived for one key, then concatenates their
-      DataProto batches and returns the merged RolloutSample.
-    - When enable_group_merge=False or prompt_hash is absent, samples pass through
-      unchanged for full backward compatibility.
+    Used by BOTH rollouter (put_sample → push_grouped) and
+    trainer (get_sample_sync → pull_grouped + DataProto.concat merge).
+
+    The TCP server handles all grouping by prompt_hash.  This client simply
+    pushes/pulls and performs the DataProto merge on the trainer side.
     """
 
-    def __init__(self, exchange_client: Any, *, expected_per_hash: int = 2, enable_gate: bool = False):
-        self.exchange_client = exchange_client
-        self.expected_per_hash = int(expected_per_hash)
-        self.enable_gate = bool(enable_gate)
-        # prompt_hash → list of RolloutSample
-        self._pending: dict[str, list] = defaultdict(list)
-        # merged samples waiting to be returned
-        self._ready: deque = deque()
-        # stats
+    def __init__(self, tcp_client: Any):
+        self.tcp_client = tcp_client
         self._merged_groups = 0
-        self._orphan_groups = 0
-        self._passthrough_samples = 0
-        # Warn when pending backlog exceeds this many distinct hashes.
-        # With staleness_threshold=N the backlog can reach ~N*required_prompts before
-        # the slower side catches up; tune this threshold accordingly.
-        self._pending_warn_threshold = 30
 
     # ------------------------------------------------------------------
-    # Core: get_sample_sync (called synchronously by FullyAsyncTrainer)
+    # Rollouter side: push sample to server with prompt_hash
+    # ------------------------------------------------------------------
+
+    async def put_sample(self, sample: Any, prompt_hash: str = "") -> bool:
+        """Push sample to TCP server for hash-based grouping."""
+        return await self.tcp_client.push_grouped_async(prompt_hash, sample)
+
+    # ------------------------------------------------------------------
+    # Trainer side: pull a completed group and merge DataProto
     # ------------------------------------------------------------------
 
     def get_sample_sync(self) -> tuple[Any, int]:
-        """Return (serialized_merged_sample, approx_queue_len) or (None, 0) on end-of-stream."""
+        """Pull a merged group from TCP server. Blocks until a group is ready."""
         import ray.cloudpickle as pkl
         from verl import DataProto
         from verl.experimental.fully_async_policy.detach_utils import RolloutSample
 
-        while not self._ready:
-            # Fall through to exchange_client for the next raw sample.
-            if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
-                self.exchange_client.gate_wait_get_sync()
-            raw_result = self.exchange_client.recv_from_peer_sync()
-            # recv_from_peer_sync returns (item, queue_len)
-            raw, qlen = raw_result if isinstance(raw_result, tuple) else (raw_result, 0)
+        group_bytes, qlen = self.tcp_client.pull_grouped_sync()
+        samples = [pkl.loads(b) for b in group_bytes]
 
-            if raw is None:
-                # End-of-stream signal: flush pending orphans first.
-                self._flush_orphans(pkl, DataProto, RolloutSample)
-                if not self._ready:
-                    return None, 0
-                break
+        # Extract source sides from non_tensor_batch for logging
+        sides = []
+        for s in samples:
+            try:
+                side = str(s.full_batch.non_tensor_batch.get("source_side", ["?"])[0])
+            except Exception:
+                side = "?"
+            sides.append(side)
 
-            sample = pkl.loads(raw)
-            ph, side = self._extract_hash_and_side(sample)
-
-            if not ph:
-                # No hash present → pass through immediately (backward compat).
-                self._passthrough_samples += 1
-                print(
-                    f"[GroupMergeMQClient] PASSTHROUGH side={side} (no prompt_hash) "
-                    f"total_passthrough={self._passthrough_samples}"
-                )
-                self._ready.append((raw, qlen))
-            else:
-                self._pending[ph].append(sample)
-                current_count = len(self._pending[ph])
-                print(
-                    f"[GroupMergeMQClient] RECV  hash={ph[:8]} side={side} "
-                    f"count={current_count}/{self.expected_per_hash} "
-                    f"pending_hashes={len(self._pending)} "
-                    f"merged_so_far={self._merged_groups}"
-                )
-
-                # Warn if pending backlog is growing large (one side too far ahead)
-                if len(self._pending) > self._pending_warn_threshold:
-                    oldest_hashes = list(self._pending.keys())[:5]
-                    print(
-                        f"[GroupMergeMQClient] WARNING: pending backlog={len(self._pending)} "
-                        f"hashes > warn_threshold={self._pending_warn_threshold}. "
-                        f"One side may be ahead due to staleness. "
-                        f"Oldest pending hashes (short): {[h[:8] for h in oldest_hashes]}"
-                    )
-
-                if current_count >= self.expected_per_hash:
-                    group = self._pending.pop(ph)
-                    source_sides = [self._extract_hash_and_side(s)[1] for s in group]
-                    merged = self._merge_group(group, DataProto, RolloutSample)
-                    merged_bytes = pkl.dumps(merged)
-                    self._merged_groups += 1
-                    print(
-                        f"[GroupMergeMQClient] MATCH hash={ph[:8]} "
-                        f"sides={source_sides} "
-                        f"group_samples={len(group)} "
-                        f"merged_batch_size={len(merged.full_batch)} "
-                        f"(expected rollout.n * expected_per_hash responses) "
-                        f"total_merged={self._merged_groups} "
-                        f"pending_remaining={len(self._pending)}"
-                    )
-                    self._ready.append((merged_bytes, qlen))
-
-        return self._ready.popleft()
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_hash_and_side(sample) -> tuple[str, str]:
-        """Extract both prompt_hash and source_side from a RolloutSample's non_tensor_batch."""
-        ph, side = "", "?"
-        try:
-            nb = sample.full_batch.non_tensor_batch
-            if nb is not None:
-                if "prompt_hash" in nb:
-                    ph = str(nb["prompt_hash"][0])
-                if "source_side" in nb:
-                    side = str(nb["source_side"][0])
-        except Exception:
-            pass
-        return ph, side
-
-    @staticmethod
-    def _extract_hash(sample) -> str:
-        ph, _ = GroupMergeMQClient._extract_hash_and_side(sample)
-        return ph
-
-    @staticmethod
-    def _merge_group(group, DataProto, RolloutSample):
-        merged_batch = DataProto.concat([s.full_batch for s in group])
-        return RolloutSample(
+        # Merge all DataProto batches into one large group
+        merged_batch = DataProto.concat([s.full_batch for s in samples])
+        merged = RolloutSample(
             full_batch=merged_batch,
-            sample_id=group[0].sample_id + "_merged",
-            epoch=group[0].epoch,
-            rollout_status=group[0].rollout_status,
-            prompt_hash=group[0].prompt_hash,
+            sample_id=samples[0].sample_id + "_merged",
+            epoch=samples[0].epoch,
+            rollout_status=samples[0].rollout_status,
+            prompt_hash=samples[0].prompt_hash,
         )
+        self._merged_groups += 1
 
-    def _flush_orphans(self, pkl, DataProto, RolloutSample):
-        if not self._pending:
-            return
+        ph = samples[0].prompt_hash or "?"
         print(
-            f"[GroupMergeMQClient] Flushing {len(self._pending)} orphan hash(es) on end-of-stream. "
-            f"This is normal if one side had staleness bursts ahead of the other."
+            f"[GroupMergeMQClient] MERGED hash={ph[:8]} "
+            f"sides={sides} merged_batch_size={len(merged_batch)} "
+            f"total_merged={self._merged_groups}",
+            flush=True,
         )
-        for ph, group in list(self._pending.items()):
-            self._orphan_groups += 1
-            source_sides = [self._extract_hash_and_side(s)[1] for s in group]
-            print(
-                f"[GroupMergeMQClient] ORPHAN hash={ph[:8]} "
-                f"sides={source_sides} "
-                f"arrived={len(group)}/{self.expected_per_hash} "
-                f"(flushing as partial group, total_orphans={self._orphan_groups})"
-            )
-            merged_bytes = pkl.dumps(self._merge_group(group, DataProto, RolloutSample))
-            self._ready.append((merged_bytes, 0))
-        self._pending.clear()
+
+        return pkl.dumps(merged), qlen
 
     # ------------------------------------------------------------------
-    # Delegate remaining MQ interface to underlying exchange_client
-    # The rollouter still uses ExchangeAsMessageQueueClient for put_sample.
+    # Stats (used by rollouter for backpressure)
     # ------------------------------------------------------------------
-
-    async def put_sample(self, sample: Any) -> bool:
-        if self.enable_gate and hasattr(self.exchange_client, "gate_wait_put_sync"):
-            self.exchange_client.gate_wait_put_sync()
-        return await self.exchange_client.send_to_peer(sample)
-
-    async def get_sample(self) -> Any | None:
-        res = await self.exchange_client.recv_from_peer()
-        return res[0] if isinstance(res, tuple) else res
 
     async def get_queue_size(self) -> int:
         stats = self.get_statistics_sync()
-        return int(stats.get("incoming_size", 0))
+        return int(stats.get("queue_size", 0))
 
     async def get_statistics(self) -> dict[str, Any]:
         return self.get_statistics_sync()
 
     def get_statistics_sync(self) -> dict[str, Any]:
-        stats = self.exchange_client.get_statistics_sync()
-        side = getattr(self.exchange_client, "side", "A")
-        if side == "A":
-            incoming = stats.get("b_to_a_size", 0)
-            outgoing = stats.get("a_to_b_size", 0)
-        else:
-            incoming = stats.get("a_to_b_size", 0)
-            outgoing = stats.get("b_to_a_size", 0)
+        stats = self.tcp_client.get_statistics_sync()
         return {
             **stats,
-            "incoming_size": incoming,
-            "outgoing_size": outgoing,
-            # queue_size used by rollouter backpressure check
-            "queue_size": outgoing,
+            "queue_size": stats.get("queue_size", 0),
             "group_merge/merged_groups": self._merged_groups,
-            "group_merge/orphan_groups": self._orphan_groups,
-            "group_merge/passthrough_samples": self._passthrough_samples,
-            "group_merge/pending_hashes": len(self._pending),
         }
+
+    # ------------------------------------------------------------------
+    # Compatibility stubs (required by FullyAsyncTrainer/Rollouter API)
+    # ------------------------------------------------------------------
+
+    async def get_sample(self) -> Any | None:
+        result = self.get_sample_sync()
+        return result[0] if result else None
 
     async def clear_queue(self):
         return None
@@ -434,10 +320,7 @@ class FullyAsyncExchangeTaskRunner:
         # Create / reuse a detached exchange actor so A and B can connect to the same channel.
         backend = str(getattr(exchange_cfg, "backend", "ray")).lower()
         max_queue_size = int(getattr(exchange_cfg, "max_queue_size", 20000))
-        # If enabled, gate put/get and flip phase on param update (stronger than basic "cross-feed" design).
         enable_gate = bool(getattr(exchange_cfg, "enable_gate", False))
-        enable_group_merge = bool(getattr(exchange_cfg, "enable_group_merge", False))
-        expected_per_hash = int(getattr(exchange_cfg, "expected_per_hash", 2))
         if backend == "ray":
             namespace = ray.get_runtime_context().namespace
             try:
@@ -456,37 +339,22 @@ class FullyAsyncExchangeTaskRunner:
             host = str(getattr(exchange_cfg, "host", "127.0.0.1"))
             port = int(getattr(exchange_cfg, "port", 18080))
             tcp_client = TcpExchangeClient(host=host, port=port, run_id=run_id, side=side)
-            # Rollouter uses ExchangeAsMessageQueueClient for put_sample (sends to both
-            # a_to_b and a_to_a via TCP server fan-out).
-            rollouter_mq_client = ExchangeAsMessageQueueClient(tcp_client, enable_gate=enable_gate)
-            # Trainer uses GroupMergeMQClient when enable_group_merge is True, so that
-            # pull_for_X alternates between own and peer rollouts and merges them by hash.
-            if enable_group_merge:
-                trainer_mq_client = GroupMergeMQClient(
-                    tcp_client, expected_per_hash=expected_per_hash, enable_gate=enable_gate
-                )
-                print(
-                    f"[EXCHANGE MAIN] GroupMergeMQClient enabled: expected_per_hash={expected_per_hash}",
-                    flush=True,
-                )
-            else:
-                trainer_mq_client = ExchangeAsMessageQueueClient(tcp_client, enable_gate=enable_gate)
+            # Single GroupMergeMQClient used by both rollouter (put_sample) and trainer (get_sample_sync)
+            mq_client = GroupMergeMQClient(tcp_client)
             self.components["exchange_actor"] = None
-            self.components["rollouter_mq_client"] = rollouter_mq_client
-            self.components["trainer_mq_client"] = trainer_mq_client
-            # For backward compat keep a single reference too:
-            mq_client = rollouter_mq_client
-            print(f"[EXCHANGE MAIN] using tcp exchange {host}:{port} run_id={run_id} side={side}", flush=True)
+            print(
+                f"[EXCHANGE MAIN] TCP hash-grouped exchange: {host}:{port} "
+                f"run_id={run_id} side={side}",
+                flush=True,
+            )
         else:
             raise ValueError(f"exchange.backend must be ray/tcp, got: {backend}")
 
         self.components["message_queue_client"] = mq_client
 
-        # Wire client — rollouter and trainer may use different clients when group merge is on.
-        rollouter_client = self.components.get("rollouter_mq_client", mq_client)
-        trainer_client = self.components.get("trainer_mq_client", mq_client)
-        ray.get(self.components["rollouter"].set_message_queue_client.remote(rollouter_client))
-        ray.get(self.components["trainer"].set_message_queue_client.remote(trainer_client))
+        # Wire client — both rollouter and trainer use the same mq_client
+        ray.get(self.components["rollouter"].set_message_queue_client.remote(mq_client))
+        ray.get(self.components["trainer"].set_message_queue_client.remote(mq_client))
 
         # Load checkpoints
         ray.get(self.components["trainer"].load_checkpoint.remote())

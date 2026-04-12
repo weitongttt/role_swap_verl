@@ -581,6 +581,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
 
         success = await self.message_queue_client.put_sample(
             sample=ray.cloudpickle.dumps(rollout_sample),
+            prompt_hash=rollout_sample.prompt_hash or "",
         )
         if success:
             self.total_generated_samples += 1

@@ -18,6 +18,5 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 $PYTHON_BIN -m verl.experimental.fully_async_policy.tcp_exchange_server_main \
   --host "$EXCHANGE_HOST" \
-  --port "$EXCHANGE_PORT" \
-  --max-queue-size "$EXCHANGE_MAX_QUEUE_SIZE"
+  --port "$EXCHANGE_PORT"
 
