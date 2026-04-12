@@ -428,6 +428,24 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             await self._fit_validate()
         self._fit_save_checkpoint(force=True)
 
+    def _fit_compute_advantage(self, batch) -> "DataProto":
+        """Override parent to log GRPO group sizes for verification."""
+        from collections import Counter
+
+        if "uid" in batch.non_tensor_batch:
+            uid_counts = Counter(batch.non_tensor_batch["uid"])
+            group_sizes = Counter(uid_counts.values())
+            # group_sizes maps: {group_size: number_of_groups_with_that_size}
+            total_uids = len(uid_counts)
+            print(
+                f"[FullyAsyncTrainer] GRPO group stats: "
+                f"total_groups={total_uids} "
+                f"group_size_distribution={dict(group_sizes)} "
+                f"(expect size=8 for cross-cluster merge, size=4 for single-cluster)",
+                flush=True,
+            )
+        return super()._fit_compute_advantage(batch)
+
     async def fit_step(self, batch_dict: dict = None):
         """
         Single-step training template method. Handles all logic for one training step.
