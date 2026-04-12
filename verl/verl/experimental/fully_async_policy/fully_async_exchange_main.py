@@ -143,15 +143,24 @@ class GroupMergeMQClient:
     """Unified MQ client for hash-grouped TCP exchange (GAP-GRPO).
 
     Used by BOTH rollouter (put_sample → push_grouped) and
-    trainer (get_sample_sync → pull_grouped + DataProto.concat merge).
+    trainer (get_sample_sync → pull_grouped).
 
-    The TCP server handles all grouping by prompt_hash.  This client simply
-    pushes/pulls and performs the DataProto merge on the trainer side.
+    The TCP server groups samples by prompt_hash.  When the server returns a
+    completed group (list of pickled samples from both sides), this client
+    buffers them and returns one at a time.  This ensures:
+    - The trainer's required_samples count works correctly (1 call = 1 sample).
+    - Samples from both sides for the same prompt arrive in the same training
+      batch (because they are buffered together and returned consecutively).
     """
 
     def __init__(self, tcp_client: Any):
+        from collections import deque
+
         self.tcp_client = tcp_client
-        self._merged_groups = 0
+        self._buffer: deque = deque()
+        self._buffer_qlen: int = 0
+        self._groups_pulled: int = 0
+        self._total_returned: int = 0
 
     # ------------------------------------------------------------------
     # Rollouter side: push sample to server with prompt_hash
@@ -162,47 +171,52 @@ class GroupMergeMQClient:
         return await self.tcp_client.push_grouped_async(prompt_hash, sample)
 
     # ------------------------------------------------------------------
-    # Trainer side: pull a completed group and merge DataProto
+    # Trainer side: return individual samples from grouped pulls
     # ------------------------------------------------------------------
 
     def get_sample_sync(self) -> tuple[Any, int]:
-        """Pull a merged group from TCP server. Blocks until a group is ready."""
-        import ray.cloudpickle as pkl
-        from verl import DataProto
-        from verl.experimental.fully_async_policy.detach_utils import RolloutSample
+        """Return one sample at a time. Pulls a new group from the server
+        when the buffer is empty; then returns buffered samples one by one.
+        """
+        if not self._buffer:
+            group_bytes, qlen = self.tcp_client.pull_grouped_sync()
+            self._buffer_qlen = qlen
+            self._groups_pulled += 1
 
-        group_bytes, qlen = self.tcp_client.pull_grouped_sync()
-        samples = [pkl.loads(b) for b in group_bytes]
+            # Buffer individual samples (do NOT merge — keeps trainer count correct)
+            self._buffer.extend(group_bytes)
 
-        # Extract source sides from non_tensor_batch for logging
-        sides = []
-        for s in samples:
-            try:
-                side = str(s.full_batch.non_tensor_batch.get("source_side", ["?"])[0])
-            except Exception:
-                side = "?"
-            sides.append(side)
+            # Log: detailed for first 5 groups, then periodic summary
+            if self._groups_pulled <= 5 or self._groups_pulled % 50 == 0:
+                try:
+                    import ray.cloudpickle as pkl
 
-        # Merge all DataProto batches into one large group
-        merged_batch = DataProto.concat([s.full_batch for s in samples])
-        merged = RolloutSample(
-            full_batch=merged_batch,
-            sample_id=samples[0].sample_id + "_merged",
-            epoch=samples[0].epoch,
-            rollout_status=samples[0].rollout_status,
-            prompt_hash=samples[0].prompt_hash,
-        )
-        self._merged_groups += 1
+                    sides = []
+                    ph_short = "?"
+                    for b in group_bytes:
+                        s = pkl.loads(b)
+                        try:
+                            sides.append(str(s.full_batch.non_tensor_batch.get("source_side", ["?"])[0]))
+                        except Exception:
+                            sides.append("?")
+                        if ph_short == "?":
+                            ph_short = (s.prompt_hash or "?")[:8]
+                    print(
+                        f"[GroupMergeMQClient] GROUP #{self._groups_pulled} "
+                        f"hash={ph_short} sides={sides} "
+                        f"group_size={len(group_bytes)} "
+                        f"total_returned={self._total_returned}",
+                        flush=True,
+                    )
+                except Exception:
+                    print(
+                        f"[GroupMergeMQClient] GROUP #{self._groups_pulled} "
+                        f"group_size={len(group_bytes)}",
+                        flush=True,
+                    )
 
-        ph = samples[0].prompt_hash or "?"
-        print(
-            f"[GroupMergeMQClient] MERGED hash={ph[:8]} "
-            f"sides={sides} merged_batch_size={len(merged_batch)} "
-            f"total_merged={self._merged_groups}",
-            flush=True,
-        )
-
-        return pkl.dumps(merged), qlen
+        self._total_returned += 1
+        return self._buffer.popleft(), self._buffer_qlen
 
     # ------------------------------------------------------------------
     # Stats (used by rollouter for backpressure)
@@ -220,7 +234,9 @@ class GroupMergeMQClient:
         return {
             **stats,
             "queue_size": stats.get("queue_size", 0),
-            "group_merge/merged_groups": self._merged_groups,
+            "group_merge/groups_pulled": self._groups_pulled,
+            "group_merge/total_returned": self._total_returned,
+            "group_merge/buffer_size": len(self._buffer),
         }
 
     # ------------------------------------------------------------------

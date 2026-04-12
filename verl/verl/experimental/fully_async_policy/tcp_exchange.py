@@ -145,8 +145,13 @@ class TcpExchangeServer:
                             st.ready_for_a.append([payload])
                             st.ready_for_b.append([payload])
                             st.stats["passthrough"] += 1
+                            print(
+                                f"[TCP_EXCHANGE] PUSH passthrough (no hash) side={side}",
+                                flush=True,
+                            )
                         else:
                             # Add payload to BOTH pending dicts
+                            became_ready = False
                             for pending, ready in [
                                 (st.pending_for_a, st.ready_for_a),
                                 (st.pending_for_b, st.ready_for_b),
@@ -157,26 +162,41 @@ class TcpExchangeServer:
                                 if len(pending[prompt_hash]) >= EXPECTED_PER_HASH:
                                     group = pending.pop(prompt_hash)
                                     ready.append(group)
+                                    became_ready = True
 
                             st.stats["pushes"] += 1
 
-                            # Log when group becomes READY
-                            if prompt_hash not in st.pending_for_a:
+                            if became_ready:
+                                st.stats["groups_formed"] = st.stats.get("groups_formed", 0) + 1
                                 print(
-                                    f"[TCP_EXCHANGE] READY hash={prompt_hash[:8]} "
+                                    f"[TCP_EXCHANGE] PUSH READY hash={prompt_hash[:8]} "
                                     f"completed_by={side} "
                                     f"ready_a={len(st.ready_for_a)} "
                                     f"ready_b={len(st.ready_for_b)} "
                                     f"pending_a={len(st.pending_for_a)} "
-                                    f"pending_b={len(st.pending_for_b)}",
+                                    f"pending_b={len(st.pending_for_b)} "
+                                    f"total_groups={st.stats.get('groups_formed', 0)}",
                                     flush=True,
                                 )
+                            else:
+                                # Only log every 20th pending push to reduce noise
+                                if st.stats["pushes"] % 20 == 0:
+                                    print(
+                                        f"[TCP_EXCHANGE] PUSH pending (summary) "
+                                        f"total_pushes={st.stats['pushes']} "
+                                        f"pending_a={len(st.pending_for_a)} "
+                                        f"pending_b={len(st.pending_for_b)} "
+                                        f"ready_a={len(st.ready_for_a)} "
+                                        f"ready_b={len(st.ready_for_b)} "
+                                        f"groups_formed={st.stats.get('groups_formed', 0)}",
+                                        flush=True,
+                                    )
 
                             # Warn if pending backlog is large
-                            if len(st.pending_for_a) > 50:
+                            if len(st.pending_for_a) > 50 and st.stats["pushes"] % 50 == 0:
                                 print(
                                     f"[TCP_EXCHANGE] WARNING pending_a={len(st.pending_for_a)} "
-                                    f"(one side may be much faster)",
+                                    f"(no matching pushes from other side yet)",
                                     flush=True,
                                 )
 
@@ -188,6 +208,11 @@ class TcpExchangeServer:
                 # ── pull_grouped ──────────────────────────────────────
                 if op == "pull_grouped":
                     side = str(req.get("side", "A")).upper()
+                    print(
+                        f"[TCP_EXCHANGE] PULL request from side={side} "
+                        f"ready_{side.lower()}={len(st.ready_for_a if side == 'A' else st.ready_for_b)}",
+                        flush=True,
+                    )
 
                     async with st.cond:
                         ready = st.ready_for_a if side == "A" else st.ready_for_b
@@ -196,6 +221,13 @@ class TcpExchangeServer:
                         group = ready.popleft()
                         st.stats[f"consumed_{side.lower()}"] += 1
 
+                    print(
+                        f"[TCP_EXCHANGE] PULL delivered side={side} "
+                        f"group_size={len(group)} "
+                        f"remaining={len(ready)} "
+                        f"total_consumed_{side.lower()}={st.stats[f'consumed_{side.lower()}']}",
+                        flush=True,
+                    )
                     await _send(writer, {"ok": True, "result": (group, len(ready)), "error": None})
                     continue
 
@@ -209,7 +241,10 @@ class TcpExchangeServer:
                             "total_pending_samples": total_pending,
                             "ready_for_a": len(st.ready_for_a),
                             "ready_for_b": len(st.ready_for_b),
-                            "queue_size": total_pending + (len(st.ready_for_a) + len(st.ready_for_b)) * EXPECTED_PER_HASH,
+                            # queue_size only counts READY groups (consumed by trainer).
+                            # pending samples must NOT count: they haven't matched yet,
+                            # and pausing the rollouter would prevent matching → deadlock.
+                            "queue_size": (len(st.ready_for_a) + len(st.ready_for_b)) * EXPECTED_PER_HASH,
                             **dict(st.stats),
                         }
                     await _send(writer, {"ok": True, "result": res, "error": None})
