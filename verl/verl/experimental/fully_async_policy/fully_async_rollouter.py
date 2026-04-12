@@ -77,7 +77,17 @@ def _compute_prompt_hash(batch_dict) -> str:
         return h
     except Exception as exc:
         # Graceful fallback: no merge for this sample.
-        print(f"[_compute_prompt_hash] failed ({exc!r}), falling back to empty hash")
+        # Print available keys so we can identify the correct key name.
+        try:
+            if hasattr(batch_dict, "keys"):
+                avail = list(batch_dict.keys())
+            elif hasattr(batch_dict, "batch"):
+                avail = f"DataProto batch_keys={list(batch_dict.batch.keys())}"
+            else:
+                avail = type(batch_dict).__name__
+        except Exception:
+            avail = "unknown"
+        print(f"[_compute_prompt_hash] failed ({exc!r}), available keys: {avail}, falling back to empty hash")
         return ""
 
 
