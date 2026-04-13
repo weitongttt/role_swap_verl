@@ -52,7 +52,7 @@ class MessageQueue:
 
         print(f"[MessageQueue] initialized with max_queue_size={max_queue_size}")
 
-    async def put_sample(self, sample: Any) -> bool:
+    async def put_sample(self, sample: Any, **kwargs) -> bool:
         """
         Put a batch sample into the queue
 
@@ -183,7 +183,7 @@ class MessageQueueClient:
     def __init__(self, queue_actor: Any):
         self.queue_actor = queue_actor
 
-    async def put_sample(self, sample: Any) -> bool:
+    async def put_sample(self, sample: Any, **kwargs) -> bool:
         """Put batch into queue (async)"""
         future = self.queue_actor.put_sample.remote(sample)
         return await asyncio.wrap_future(future.future())
