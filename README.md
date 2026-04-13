@@ -1,104 +1,85 @@
-## Role Swap：基于 TCP 交换通道的 Fully-Async A/B 训练
+# GAP-GRPO: 基于跨集群样本交换的异步大组距 PPO 训练
+(原 Role Swap 演进版本)
 
-本仓库里的 `role_swap` 指的是一种“拆开成两个独立侧（A/B）+ 外部交换通道”的 fully-async 改造方式：  
-两个侧各自运行 `FullyAsyncTrainer/FullyAsyncRollouter`，但样本通过 **TCP 双向交换队列** 在 A/B 之间交叉流动，从而让训练/采样的角色在异步过程中实现交替节奏（并避免单机协同结构里容易出现的资源空转/尾部等待）。
+本项目的核心创新在于实现 **GAP-GRPO (Group Advantage PPO via cross-cluster exchange)**。
+在全异步（Fully-Async）训练架构下，我们将集群拆分为互相独立的 Side A 和 Side B，除了原有的采样/训练角色交替（Role Swap）用以避免硬件尾部等待外，更重要的是**通过 TCP 队列跨集群深度交换 Rollout 轨迹，实现了等效 GRPO Group Size 的翻倍**。
 
-代码入口与交换实现分别在：
-- `verl/verl/experimental/fully_async_policy/fully_async_exchange_main.py`：exchange-enabled 版 fully async
-- `verl/verl/experimental/fully_async_policy/tcp_exchange.py`：TCP 双向队列交换通道
+## 🌟 核心创新：跨集群 Group Size 无缝扩展
 
-## 方法概览（role_swap 的关键点）
+传统的 GRPO 需要在单个节点上完整前向生成 $N$ 个 Responses（例如 $N=8$）来计算组内 Advantage。在显存受限或算力瓶颈（特别是模型向 1.7B 或更高参数演进）时，单机很难同时负担大量的单 prompt 重组生成。
 
-1. **外部交换通道（A<->B）**  
-`fully_async_exchange_main.py` 在 `exchange.backend=tcp` 时，会用 `TcpExchangeClient` 把 rollouter 产生的样本送到对端；trainer 从对端拉取样本。
+我们在全异步策略上引入了以下协同机制：
 
-2. **两个侧独立运行 Ray + 独立 GPU 切片**  
-`run_fully_async_A.sh` 与 `run_fully_async_B.sh` 会分别启动/连接不同端口的 Ray head，并通过 `CUDA_VISIBLE_DEVICES` 做硬隔离。
+1. **基于 `prompt_hash` 的全局 Uid 匹配**
+基于原生的 `verl` 实现，我们将 `fully_async_rollouter.py` 中基于自增 `sample_id` 的 `uid` 改作 `prompt_hash`。在优势估计（Advantage Computation）阶段，当 Cluster A 和 Cluster B 针对同一个 Prompt 各自产生 4 个 Responses 并被汇入队列时，Trainer 能够精准识别它们隶属同一 Prompt 并合并为一组。
 
-3. **A/B 启动顺序使用 `exchange.mode` 控制，避免死锁**  
-`fully_async_exchange_main` 在 `_run_training_loop()` 中对不同 `exchange.mode` 做了不同的启动调度：
-- `side=A, exchange.mode=both`：A 先 rollouter 后 trainer
-- `side=B, exchange.mode=train_first`：B 先 trainer（等待第一批样本），随后启动 rollouter
+2. **强制确定性全局采样 (`data.seed`)**
+A 和 B 端的 `run_fully_async_A/B.sh` 使用了相同的 `data.seed=99`，保证独立运行的两个计算集群能按照绝对同步的节奏抽取相同的 Prompts 序列，使得跨集群聚合成为可能。
 
-4. **用较“紧”的参数同步节奏做同步化**（脚本内已固定）  
-`run_fully_async_A.sh`/`run_fully_async_B.sh` 设置了：
-- `async_training.trigger_parameter_sync_step=1`
-- `async_training.staleness_threshold=100`
-- `async_training.partial_rollout=false`
+3. **智能 TCP 交换聚合合并**
+在协议层面上，通过配置 `+exchange.enable_group_merge=true` 及 `+exchange.expected_per_hash=2`，TCP 服务端会自动合并两端收发的数据包。
 
-这会让参数同步更频繁，从而更容易观察到 A/B 侧在采样-训练之间的交替节奏。
+**✅ 最终效果**：
+两端各自的 Rollouter 引擎仅需负担极小的单批次生成压力 (`n_resp_per_prompt=4`)，从而最大化生成吞吐；但在最终送往 Trainer 的 Advantage 估计池中，实际作为更强大、探索性更高的 `group_size=8` 参与梯度计算，获得更陡峭的收敛曲线。
 
-## 运行方法（role_swap）
+---
 
-### 1) 启动 TCP 交换服务器
+## 🏗 方法概览（底层通信逻辑）
 
-在一个终端执行：
+1. **外部交换通道（A <-> B）**  
+`fully_async_exchange_main.py` 在 `exchange.backend=tcp` 设定时，使用 `TcpExchangeClient` 把 rollouter 产生的样本送到对端服务器，trainer 同样从对端拉取共享样本。
 
+2. **独立 Ray 侧 + 算力切分物理隔离**  
+`run_fully_async_A.sh` 和 `run_fully_async_B.sh` 会由于硬编码隔离，独立启动并连接至不同网段或端口的 Ray head 节点，从根本上隔离了由于模型加载带来的单集群多机通信灾难。
+
+3. **双模式切换防御启动死锁**  
+由于强关联了 `expected_per_hash=2`，双侧的启动顺序使用了 `exchange.mode` 分流设计：
+- `side=A, exchange.mode=both`：正常调度
+- `side=B, exchange.mode=train_first`：强行挂起 Rollouter，先启动 Trainer 等待对侧队列投喂防止生成越界
+
+---
+
+## 🚀 运行方法（GAP-GRPO 完整演示）
+
+### **1) 启动 TCP 样本交换中枢**
+
+在 终端 1 中执行：
 ```bash
 bash run_exchange_server.sh
 ```
+*(交换中枢参数由 `EXCHANGE_HOST` 与 `EXCHANGE_PORT` 变量控制，默认使用 `127.0.0.1:18080`)*
 
-脚本使用的参数（可选覆盖）：
-- `EXCHANGE_HOST`（默认 `127.0.0.1`）
-- `EXCHANGE_PORT`（默认 `18080`）
-- `EXCHANGE_MAX_QUEUE_SIZE`（默认 `20000`）
+### **2) 启动 Side A（rollout -> train）**
 
-### 2) 启动 Side A（rollout -> train）
-
-另开一个终端执行：
-
+在 终端 2 中执行：
 ```bash
 bash run_fully_async_A.sh
 ```
-
-Side A 关键配置要点（来自脚本）：
+**Side A 关键配置**：
 - `+exchange.side=A`
 - `+exchange.mode=both`
-- `+exchange.backend=tcp`
 - `+exchange.host=${EXCHANGE_HOST:-127.0.0.1}`
-- `+exchange.port=${EXCHANGE_PORT:-18080}`
-- `staleness_threshold=100`
-- `trigger_parameter_sync_step=1`
+- `data.seed=99` (以保证抽取数据与 B 同步)
 
-### 3) 启动 Side B（train_first）
+### **3) 启动 Side B（train_first）**
 
-再开一个终端执行：
-
+在 终端 3 中执行：
 ```bash
 bash run_fully_async_B.sh
 ```
-
-Side B 关键配置要点（来自脚本）：
+**Side B 关键配置**：
 - `+exchange.side=B`
 - `+exchange.mode=train_first`
-- 同样使用 `exchange.backend=tcp` 指向同一个交换服务器
-- B 会等待 A 写入同一个 `exchange.run_id`（默认文件：`/tmp/verl_exchange_run_id`），避免走不同通道
+- B 默认会自动扫描 A 侧抛出的 `exchange.run_id` 握手文件（`/tmp/verl_exchange_run_id`），保证安全对接同一会话。
 
-### 运行提示
-- 三个脚本最好在三个终端同时跑起来（server -> A -> B）。
-- `run_fully_async_{A,B}.sh` 内部含有硬编码的 `HYDRA_CONFIG_PATH` 和默认模型/数据集路径；如果你不是在当前目录结构下运行，需要相应调整。
+### 📌 运行与排障提示：
+*   **启动时效**：建议依次相隔较短时间分别拉起 1->2->3。
+*   **关于卡死排查**：大模型（如 1.7B）在 vLLM 内部会进行数分钟极漫长的 Cudagraph Graph 铺排和占位，并且 Actor 在首次拉起时也容易陷入 fp32 退化而爆显存，一定要确保脚本中拥有 `model_dtype="bfloat16"` 和 `trainer.val_before_train=False` 的补全设定。
 
-## Baseline 对比：run_fully_async.sh（单进程 Fully-Async）
+---
 
-`run_fully_async.sh` 作为 baseline，直接启动：
-- `python -m verl.experimental.fully_async_policy.fully_async_main`
+## 📊 Baseline 对比参考：纯单核组距
 
-它不拆分成 A/B 两个侧，也不使用外部 TCP 交换通道；而是把 rollout/trainer 放在同一个 fully-async 体系内协同。
-
-baseline 的关键参数差异（来自脚本）：
-- `async_training.trigger_parameter_sync_step=5`（role_swap 里是 `1`）
-- `async_training.staleness_threshold=100`
-- `async_training.partial_rollout=false`
-- GPU：`CUDA_VISIBLE_DEVICES=0,1`（单次启动）
-
-运行 baseline：
-
-```bash
-bash run_fully_async.sh
-```
-
-## 一句话对比总结
-
-- `role_swap`：两个侧（A/B）+ 外部 TCP 交换通道，让样本在 A/B 之间交叉流动，并通过 `exchange.mode` 选择启动顺序，形成更紧的参数同步节奏（更利于观察交替/重叠效率）。
-- `run_fully_async` baseline：同一 fully-async 框架内协同 rollout/trainer，不拆分 A/B，也不走 TCP 交换通道。
-
+为了验证 **GAP-GRPO** 的收敛收益，我们利用 `run_fully_async.sh` 作为 Baseline。
+- **命令行**：`bash run_fully_async.sh`
+- **特征**：直接作为双卡体系单体运行，它不开启任何外部架构和通道拆分，同一套环境只拥有普通的 `GRPO group_size=4`。通过同时将这两者的数据监控上传至 `SwanLab` ，可以得到 `Group Size=8` 与 `Group Size=4` 同等时长与参数同步情况下的最严格、最直观的收敛速度对比评测。

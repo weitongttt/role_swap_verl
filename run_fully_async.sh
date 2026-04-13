@@ -87,4 +87,4 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.e
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
     actor_rollout_ref.actor.fsdp_config.model_dtype="bfloat16" \
-    actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size} \
+    actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size}
