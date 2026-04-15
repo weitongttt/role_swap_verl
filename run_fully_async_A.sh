@@ -5,7 +5,7 @@ set -x
 
 # Side A: 默认负责 rollout + train
 export VERL_USE_MODELSCOPE=True
-export HYDRA_CONFIG_PATH="/zhangshihao/weitong/verl_swap/verl/verl/trainer/config"
+export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
 export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
@@ -26,8 +26,8 @@ RAY_BIN="${RAY_BIN:-}"
 if [ -z "$RAY_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/ray" ]; then
   RAY_BIN="${CONDA_PREFIX}/bin/ray"
 fi
-if [ -z "$RAY_BIN" ] && [ -x "/zhangshihao/weitong/anaconda3/envs/verl/bin/ray" ]; then
-  RAY_BIN="/zhangshihao/weitong/anaconda3/envs/verl/bin/ray"
+if [ -z "$RAY_BIN" ] && command -v ray &>/dev/null; then
+  RAY_BIN="$(command -v ray)"
 fi
 RAY_BIN="${RAY_BIN:-ray}"
 

@@ -83,3 +83,19 @@ bash run_fully_async_B.sh
 为了验证 **GAP-GRPO** 的收敛收益，我们利用 `run_fully_async.sh` 作为 Baseline。
 - **命令行**：`bash run_fully_async.sh`
 - **特征**：直接作为双卡体系单体运行，它不开启任何外部架构和通道拆分，同一套环境只拥有普通的 `GRPO group_size=4`。通过同时将这两者的数据监控上传至 `SwanLab` ，可以得到 `Group Size=8` 与 `Group Size=4` 同等时长与参数同步情况下的最严格、最直观的收敛速度对比评测。
+
+
+
+```shell
+source /zhangshihao/weitong/anaconda3/etc/profile.d/conda.sh
+conda activate yc
+cd /zhangshihao/weitong/verl_dev/
+
+# 终端 1: TCP exchange server
+python -m verl.experimental.fully_async_policy.tcp_exchange_server_main
+# 终端 2: Side A (GPU 0,1)
+bash run_fully_async_A.sh 2>&1 | tee fully_async_A_0412.log
+# 终端 3: Side B (GPU 2,3)
+bash run_fully_async_B.sh 2>&1 | tee fully_async_B_0412.log
+
+```

@@ -2,7 +2,6 @@
 set -x
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
-export PYTHONPATH="$(pwd)/verl:$PYTHONPATH"
 export CUDA_VISIBLE_DEVICES=0,1
 export RAY_ADDRESS="127.0.0.1:6381"
 export SWANLAB_API_KEY="HPA4rMyhiXXBFNbyKiW4A"
@@ -36,7 +35,7 @@ total_rollout_steps=$(((400*1*160)))
 mini_batch_size=160 # 为了做到绝对对齐实验，必须和 A 改成一模一样的 160
 require_batches=1
 test_freq=1000
-staleness_threshold=100
+staleness_threshold=3
 trigger_parameter_sync_step=1 # 对齐 A 的同步频率
 partial_rollout=false # 中断生成
 
