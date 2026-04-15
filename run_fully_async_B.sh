@@ -45,8 +45,8 @@ rollout_mode="async"
 rollout_name="vllm"
 
 adv_estimator="grpo"
-train_files="data/gsm8k/train.parquet"
-val_files="data/gsm8k/test.parquet"
+train_files="data/math/train.parquet"
+val_files="data/math/test.parquet"
 model_path="Qwen3-1.7B"
 
 train_prompt_bsz=0

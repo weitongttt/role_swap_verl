@@ -91,6 +91,9 @@ source /zhangshihao/weitong/anaconda3/etc/profile.d/conda.sh
 conda activate yc
 cd /zhangshihao/weitong/verl_dev/
 
+bash preprocess_math.sh
+
+
 # 终端 1: TCP exchange server
 python -m verl.experimental.fully_async_policy.tcp_exchange_server_main
 # 终端 2: Side A (GPU 0,1)
