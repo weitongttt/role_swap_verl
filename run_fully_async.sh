@@ -40,8 +40,8 @@ trigger_parameter_sync_step=1 # 对齐 A 的同步频率
 partial_rollout=false # 中断生成
 
 # 实验名
-project_name="qwen3_1_7b"
-experiment_name="baseline_2gpu_g4"
+project_name="gapgrpo_synced_qwen3_1_7b_MATH"
+experiment_name="baseline_2gpu_g4_0416"
 
 
 PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.experimental.fully_async_policy.fully_async_main \

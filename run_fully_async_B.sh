@@ -65,8 +65,8 @@ staleness_threshold=3
 trigger_parameter_sync_step=1
 partial_rollout=false
 
-project_name="qwen3_1_7b"
-experiment_name="synced0412b"
+project_name="gapgrpo_synced_qwen3_1_7b_MATH"
+experiment_name="0416b"
 
 # 等待 A 写入 exchange.run_id 文件，避免 A/B 用到不同通道
 EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
