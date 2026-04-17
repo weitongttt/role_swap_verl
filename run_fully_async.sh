@@ -19,8 +19,8 @@ if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6381" >/dev/null 2>&1; then
 fi
 
 adv_estimator="grpo"
-train_files="data/math/train.parquet"
-val_files="data/math/test.parquet"
+train_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
 model_path="Qwen3-1.7B"
 
 # 训练参数

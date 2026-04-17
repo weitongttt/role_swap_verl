@@ -46,8 +46,8 @@ rollout_mode="async"
 rollout_name="vllm"
 
 adv_estimator="grpo"
-train_files="data/math/train.parquet"
-val_files="data/math/test.parquet"
+train_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
 model_path="Qwen3-1.7B"
 
 train_prompt_bsz=0
@@ -128,5 +128,4 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
     actor_rollout_ref.actor.fsdp_config.model_dtype="bfloat16" \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size}
