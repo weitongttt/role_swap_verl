@@ -6,8 +6,8 @@ set -x
 # Side B: 启动时先从 train 开始，吃到 A 的 rollout 后再启动自己的 rollout
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3}
-export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6380}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
 export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
 export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
 export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"HPA4rMyhiXXBFNbyKiW4A"}
@@ -34,16 +34,16 @@ if [ -z "$RAY_BIN" ] && command -v ray &>/dev/null; then
 fi
 RAY_BIN="${RAY_BIN:-ray}"
 
-# B 集群严格只看见 2,3（硬隔离）
-CUDA_VISIBLE_DEVICES_B="${CUDA_VISIBLE_DEVICES_B:-2,3}"
+# B 独立机器，GPU 从 0 开始
+CUDA_VISIBLE_DEVICES_B="${CUDA_VISIBLE_DEVICES_B:-0,1}"
 RAY_TEMP_DIR_B="${RAY_TEMP_DIR_B:-/tmp/ray_b}"
 mkdir -p "$RAY_TEMP_DIR_B"
 
-# 不要在脚本里全局 ray stop（会把 A 的集群也杀掉）。只在本端口未启动时启动 head。
-if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6380" >/dev/null 2>&1; then
-  CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_B" "$RAY_BIN" start --head --port=6380 --num-gpus=2 --temp-dir "$RAY_TEMP_DIR_B" --include-dashboard=false
-  sleep 3
-fi
+# 独立机器：先清理旧集群，再启动新的
+"$RAY_BIN" stop --force 2>/dev/null || true
+sleep 1
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_B" "$RAY_BIN" start --head --port=6379 --num-gpus=2 --temp-dir "$RAY_TEMP_DIR_B" --include-dashboard=false
+sleep 3
 
 rollout_mode="async"
 rollout_name="vllm"

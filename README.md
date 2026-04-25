@@ -107,3 +107,5 @@ EXCHANGE_HOST=<public_ip> bash run_fully_async_A.sh
 EXCHANGE_HOST=<machine_A_ip> EXCHANGE_RUN_ID=<same_as_A> bash run_fully_async_B.sh
 
 ```
+
+use a100 and a800, first check the connectivity.

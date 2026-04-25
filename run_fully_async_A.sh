@@ -34,16 +34,16 @@ if [ -z "$RAY_BIN" ] && command -v ray &>/dev/null; then
 fi
 RAY_BIN="${RAY_BIN:-ray}"
 
-# A 集群严格只看见 0,1（硬隔离）
+# A 独立机器
 CUDA_VISIBLE_DEVICES_A="${CUDA_VISIBLE_DEVICES_A:-0,1}"
 RAY_TEMP_DIR_A="${RAY_TEMP_DIR_A:-/tmp/ray_a}"
 mkdir -p "$RAY_TEMP_DIR_A"
 
-# 不要在脚本里全局 ray stop（会把 B 的集群也杀掉）。只在本端口未启动时启动 head。
-if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6379" >/dev/null 2>&1; then
-  CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_A" "$RAY_BIN" start --head --port=6379 --num-gpus=2 --temp-dir "$RAY_TEMP_DIR_A" --include-dashboard=false
-  sleep 3
-fi
+# 先清理旧集群，再启动新的
+"$RAY_BIN" stop --force 2>/dev/null || true
+sleep 1
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_A" "$RAY_BIN" start --head --port=6379 --num-gpus=2 --temp-dir "$RAY_TEMP_DIR_A" --include-dashboard=false
+sleep 3
 
 rollout_mode="async"
 rollout_name="vllm"
