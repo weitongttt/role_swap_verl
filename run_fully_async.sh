@@ -10,6 +10,13 @@ return_raw_chat="True"
 rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
 
+adv_estimator="grpo"
+train_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
+model_path="Qwen3-1.7B"
+project_name="gapgrpo_synced_qwen3_1_7b_MATH"
+experiment_name="baseline_2gpu_g4_0422"
+
 # 独立启动 baseline 的 Ray 集群 (避开 A/B 的 6379 和 6380 端口)
 RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
 mkdir -p "$RAY_TEMP_DIR_BASE"
@@ -17,11 +24,6 @@ if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6381" >/dev/null 2>&1; then
   taskset -c 0-29 /zhangshihao/weitong/anaconda3/envs/verl/bin/ray start --head --port=6381 --num-gpus=2 --num-cpus=30 --temp-dir "$RAY_TEMP_DIR_BASE" --include-dashboard=false
   sleep 3
 fi
-
-adv_estimator="grpo"
-train_files="data/gsm8k/train.parquet"
-val_files="data/gsm8k/test.parquet"
-model_path="Qwen3-1.7B"
 
 # 训练参数
 train_prompt_bsz=0
@@ -38,10 +40,6 @@ test_freq=1000
 staleness_threshold=3
 trigger_parameter_sync_step=1 # 对齐 A 的同步频率
 partial_rollout=false # 中断生成
-
-# 实验名
-project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="baseline_2gpu_g4_0416"
 
 
 PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.experimental.fully_async_policy.fully_async_main \

@@ -20,6 +20,13 @@ export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export CPUSET_B=${CPUSET_B:-30-59}
 export RAY_NUM_CPUS_B=${RAY_NUM_CPUS_B:-30}
 
+adv_estimator="grpo"
+train_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
+model_path="Qwen3-1.7B"
+project_name="gapgrpo_synced_qwen3_1_7b_MATH"
+experiment_name="0422b"
+
 # 确保找得到 ray（B 不启动 head，但会依赖 ray.init 连接集群）
 RAY_BIN="${RAY_BIN:-}"
 if [ -z "$RAY_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/ray" ]; then
@@ -44,11 +51,6 @@ fi
 rollout_mode="async"
 rollout_name="vllm"
 
-adv_estimator="grpo"
-train_files="data/gsm8k/train.parquet"
-val_files="data/gsm8k/test.parquet"
-model_path="Qwen3-1.7B"
-
 train_prompt_bsz=0
 gen_prompt_bsz=1
 max_model_len=8192
@@ -65,8 +67,6 @@ staleness_threshold=3
 trigger_parameter_sync_step=1
 partial_rollout=false
 
-project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="0416b"
 
 # 等待 A 写入 exchange.run_id 文件，避免 A/B 用到不同通道
 EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
