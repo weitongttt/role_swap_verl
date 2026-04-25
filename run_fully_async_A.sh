@@ -1,6 +1,5 @@
 #!/bin/bash
 set -euo pipefail
-rm -f /tmp/verl_model_cache_ready /tmp/verl_exchange_run_id
 set -x
 
 # Side A: 默认负责 rollout + train
@@ -17,14 +16,11 @@ export VLLM_USE_V1=${VLLM_USE_V1:-1}
 # Ray 默认会对重复日志做去重，容易看起来“卡住没输出”
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 
-# CPU 绑核隔离（A 用 0-29）
-export CPUSET_A=${CPUSET_A:-0-29}
-export RAY_NUM_CPUS_A=${RAY_NUM_CPUS_A:-30}
 
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
-model_path="Qwen3-1.7B"
+model_path="${MODEL_PATH:-Qwen2.5-0.5B-Instruct}"
 project_name="gapgrpo_synced_qwen3_1_7b_MATH"
 experiment_name="0422a"
 
@@ -45,7 +41,7 @@ mkdir -p "$RAY_TEMP_DIR_A"
 
 # 不要在脚本里全局 ray stop（会把 B 的集群也杀掉）。只在本端口未启动时启动 head。
 if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6379" >/dev/null 2>&1; then
-  CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_A" taskset -c "$CPUSET_A" "$RAY_BIN" start --head --port=6379 --num-gpus=2 --num-cpus="$RAY_NUM_CPUS_A" --temp-dir "$RAY_TEMP_DIR_A" --include-dashboard=false --min-worker-port=20000 --max-worker-port=29999
+  CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_A" "$RAY_BIN" start --head --port=6379 --num-gpus=2 --temp-dir "$RAY_TEMP_DIR_A" --include-dashboard=false
   sleep 3
 fi
 
@@ -70,12 +66,8 @@ trigger_parameter_sync_step=1
 partial_rollout=false
 
 
-# 让 A/B 共用同一个 exchange.run_id（A 会创建，B 会等待）
-EXCHANGE_RUN_ID_FILE="${EXCHANGE_RUN_ID_FILE:-/tmp/verl_exchange_run_id}"
-if [ ! -f "$EXCHANGE_RUN_ID_FILE" ]; then
-  date +%s%N > "$EXCHANGE_RUN_ID_FILE"
-fi
-EXCHANGE_RUN_ID="$(cat "$EXCHANGE_RUN_ID_FILE")"
+# A/B 共用同一个 exchange.run_id（两边必须一致）
+EXCHANGE_RUN_ID="${EXCHANGE_RUN_ID:-gapgrpo_run_001}"
 
 PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_exchange_main \
     data.train_files=${train_files} \
@@ -103,7 +95,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     trainer.val_before_train=False \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
-    trainer.save_freq=50 \
+    trainer.save_freq=10 \
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \

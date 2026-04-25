@@ -101,4 +101,9 @@ bash run_fully_async_A.sh 2>&1 | tee fully_async_A_0412.log
 # 终端 3: Side B (GPU 2,3)
 bash run_fully_async_B.sh 2>&1 | tee fully_async_B_0412.log
 
+# Machine A:
+EXCHANGE_HOST=<public_ip> bash run_fully_async_A.sh
+# Machine B:
+EXCHANGE_HOST=<machine_A_ip> EXCHANGE_RUN_ID=<same_as_A> bash run_fully_async_B.sh
+
 ```
