@@ -20,9 +20,9 @@ export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
-model_path="${MODEL_PATH:-Qwen2.5-0.5B-Instruct}"
+model_path="$(pwd)/Qwen3-1.7B"
 project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="0422a"
+experiment_name="0425a"
 
 # 固定用同一个本机 Ray 集群（由 A 启动 head）
 RAY_BIN="${RAY_BIN:-}"
