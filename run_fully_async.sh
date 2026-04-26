@@ -2,10 +2,13 @@
 set -x
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 export RAY_ADDRESS="127.0.0.1:6381"
 export SWANLAB_API_KEY="HPA4rMyhiXXBFNbyKiW4A"
 export VLLM_USE_V1=1
+export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+# 防止 Ray 因 Linux 文件缓存 (buff/cache) 误判 OOM 而杀进程
+export RAY_memory_usage_threshold=0.99
 return_raw_chat="True"
 rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
@@ -13,15 +16,15 @@ rollout_name="vllm" # sglang or vllm
 adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
-model_path="Qwen3-1.7B"
+model_path="$(pwd)/Qwen3-1.7B"
 project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="baseline_2gpu_g4_0422"
+experiment_name="baseline_4gpu_2t2r_g4_0426"
 
 # 独立启动 baseline 的 Ray 集群 (避开 A/B 的 6379 和 6380 端口)
 RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
 mkdir -p "$RAY_TEMP_DIR_BASE"
 if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6381" >/dev/null 2>&1; then
-  taskset -c 0-29 /zhangshihao/weitong/anaconda3/envs/verl/bin/ray start --head --port=6381 --num-gpus=2 --num-cpus=30 --temp-dir "$RAY_TEMP_DIR_BASE" --include-dashboard=false
+  taskset -c 0-29 /zhangshihao/weitong/anaconda3/envs/verl/bin/ray start --head --port=6381 --num-gpus=4 --num-cpus=30 --temp-dir "$RAY_TEMP_DIR_BASE" --include-dashboard=false
   sleep 3
 fi
 
@@ -67,13 +70,14 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.e
     trainer.val_before_train=False \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
-    trainer.save_freq=50 \
+    trainer.save_freq=20 \
+    trainer.max_actor_ckpt_to_keep=2 \
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=1 \
+    trainer.n_gpus_per_node=2 \
     rollout.nnodes=1 \
-    rollout.n_gpus_per_node=1 \
+    rollout.n_gpus_per_node=2 \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     async_training.require_batches=${require_batches} \
     async_training.staleness_threshold="${staleness_threshold}" \

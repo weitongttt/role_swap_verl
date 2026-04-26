@@ -15,6 +15,8 @@ export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"HPA4rMyhiXXBFNbyKiW4A"}
 export VLLM_USE_V1=${VLLM_USE_V1:-1}
 # Ray 默认会对重复日志做去重，容易看起来“卡住没输出”
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+# 防止 Ray 因 Linux 文件缓存 (buff/cache) 误判 OOM 而杀进程
+export RAY_memory_usage_threshold=0.99
 
 
 adv_estimator="grpo"
@@ -94,7 +96,8 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     trainer.val_before_train=False \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
-    trainer.save_freq=10 \
+    trainer.save_freq=20 \
+    trainer.max_actor_ckpt_to_keep=2 \
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \
