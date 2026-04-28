@@ -24,7 +24,7 @@ experiment_name="baseline_4gpu_2t2r_g4_0426"
 RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
 mkdir -p "$RAY_TEMP_DIR_BASE"
 if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/6381" >/dev/null 2>&1; then
-  taskset -c 0-29 /zhangshihao/weitong/anaconda3/envs/verl/bin/ray start --head --port=6381 --num-gpus=4 --num-cpus=30 --temp-dir "$RAY_TEMP_DIR_BASE" --include-dashboard=false
+  taskset -c 0-29 /zhangshihao/weitong/anaconda3/envs/yc/bin/ray start --head --port=6381 --num-gpus=4 --num-cpus=30 --temp-dir "$RAY_TEMP_DIR_BASE" --include-dashboard=false
   sleep 3
 fi
 
@@ -45,7 +45,7 @@ trigger_parameter_sync_step=1 # 对齐 A 的同步频率
 partial_rollout=false # 中断生成
 
 
-PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/verl/bin/python -m verl.experimental.fully_async_policy.fully_async_main \
+PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/yc/bin/python -m verl.experimental.fully_async_policy.fully_async_main \
     data.train_files=${train_files} \
     data.val_files=${val_files} \
     data.train_batch_size=${train_prompt_bsz} \
