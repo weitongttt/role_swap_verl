@@ -18,7 +18,7 @@ train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
 model_path="$(pwd)/Qwen3-1.7B"
 project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="baseline_4gpu_1t3r_g4_0429"
+experiment_name="baseline_4gpu_2t2r_g4_0430"
 
 # 独立启动 baseline 的 Ray 集群 (避开 A/B 的 6379 和 6380 端口)
 RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
@@ -76,9 +76,9 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/yc/bin/python -m verl.exp
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=1 \
+    trainer.n_gpus_per_node=2 \
     rollout.nnodes=1 \
-    rollout.n_gpus_per_node=3 \
+    rollout.n_gpus_per_node=2 \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     async_training.require_batches=${require_batches} \
     async_training.staleness_threshold="${staleness_threshold}" \
