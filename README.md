@@ -91,6 +91,9 @@ source /zhangshihao/weitong/anaconda3/etc/profile.d/conda.sh
 conda activate yc
 cd /zhangshihao/weitong/verl_dev/
 
+bash run_fully_async.sh 2>&1 | tee fully_async_baseline_4gpu_g4_0429.log
+
+
 bash preprocess_math.sh
 
 
