@@ -24,7 +24,7 @@ train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
 model_path="$(pwd)/Qwen3-1.7B"
 project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="0425b"
+experiment_name="0508b"
 
 # 确保找得到 ray（B 不启动 head，但会依赖 ray.init 连接集群）
 RAY_BIN="${RAY_BIN:-}"
