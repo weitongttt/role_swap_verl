@@ -84,12 +84,32 @@ bash run_fully_async_B.sh
 - **命令行**：`bash run_fully_async.sh`
 - **特征**：直接作为双卡体系单体运行，它不开启任何外部架构和通道拆分，同一套环境只拥有普通的 `GRPO group_size=4`。通过同时将这两者的数据监控上传至 `SwanLab` ，可以得到 `Group Size=8` 与 `Group Size=4` 同等时长与参数同步情况下的最严格、最直观的收敛速度对比评测。
 
+```
 
 
-```shell
+UDA_VISIBLE_DEVICES_A=0,1 RAY_PORT_A=6379 SWANLAB_API_KEY=HPA4rMyhiXXBFNbyKiW4A model_path=./Qwen2.5-0.5B-Instruct bash verl/experimental/gap_grpo/shell/run_gap_grpo_site_a.sh
+
+
+UDA_VISIBLE_DEVICES_B=2,3 RAY_PORT_B=6380 SWANLAB_API_KEY=HPA4rMyhiXXBFNbyKiW4A model_path=./Qwen2.5-0.5B-Instruct bash verl/experimental/gap_grpo/shell/run_gap_grpo_site_b.sh
+
+SWANLAB_API_KEY=HPA4rMyhiXXBFNbyKiW4A model_path=./Qwen2.5-0.5B-Instruct bash verl/experimental/gap_grpo/shell/run_baseline.sh
+
+
+bash verl/experimental/gap_grpo/shell/run_exchange_server.sh
+
+CUDA_VISIBLE_DEVICES=0,1 ray start --head --port=6379 --num-gpus=2 --num-cpus=60 --temp-dir=/tmp/ray_gap_grpo_a --include-dashboard=false
+
+CUDA_VISIBLE_DEVICES=2,3 ray start --head --port=6380 --num-gpus=2 --num-cpus=60 --temp-dir=/tmp/ray_gap_grpo_b --include-dashboard=false
+
+ray status --address 127.0.0.1:6379
+ray status --address 127.0.0.1:6380
+
+ray stop --address 127.0.0.1:6379 -f
+ray stop --address 127.0.0.1:6380 -f
+
 source /zhangshihao/weitong/anaconda3/etc/profile.d/conda.sh
-conda activate yc
-cd /zhangshihao/weitong/verl_dev/
+conda activate ycverl
+cd /zhangshihao/weitong/yc/verl/
 
 bash run_fully_async.sh 2>&1 | tee fully_async_baseline_4gpu_g4_0429.log
 
@@ -112,3 +132,23 @@ EXCHANGE_HOST=<machine_A_ip> EXCHANGE_RUN_ID=<same_as_A> bash run_fully_async_B.
 ```
 
 use a100 and a800, first check the connectivity.
+
+
+```
+CUDA_VISIBLE_DEVICES=0,1 RAY_ADDRESS=127.0.0.1:6379 python -c "
+import time
+print('1: importing...')
+t0 = time.time()
+from verl.experimental.gap_grpo.main import GapGrpoTaskRunner
+print(f'2: import done in {time.time()-t0:.1f}s')
+import ray
+print('3: ray.init...')
+ray.init(address='auto')
+print('4: creating actor...')
+runner = GapGrpoTaskRunner.remote()
+print('5: actor created')
+"
+
+
+
+```

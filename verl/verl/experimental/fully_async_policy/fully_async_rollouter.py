@@ -301,23 +301,6 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             self.step_start_time = time.time()
         return timing_raw
 
-    async def bootstrap_pause(self) -> None:
-        """
-        Pause generation immediately. Intended for side-B bootstrap:
-        start rollouter actor/process, but keep it from generating until the first
-        trainer param sync triggers reset_staleness().
-        """
-        async with self.lock:
-            self.paused = True
-            if self.max_required_samples is not None:
-                # Force pause condition in _should_pause_generation().
-                self.staleness_samples = int(self.max_required_samples)
-            self.condition.notify_all()
-            print(
-                f"[FullyAsyncRollouter][Public][bootstrap_pause] paused={self.paused} "
-                f"staleness_samples={self.staleness_samples} max_required_samples={self.max_required_samples}"
-            )
-
     def do_validate(self) -> ValidateMetrics:
         """Run validation and return metrics"""
         timing_raw = {}

@@ -376,14 +376,6 @@ class FullyAsyncExchangeTaskRunner:
         ray.get(self.components["trainer"].load_checkpoint.remote())
         ray.get(self.components["rollouter"].load_checkpoint.remote())
 
-        # Bootstrap: side B rollouter starts paused (no generation) until first param sync.
-        bootstrap_b_pause_rollouter = bool(getattr(exchange_cfg, "bootstrap_b_pause_rollouter", True))
-        if side == "B" and bootstrap_b_pause_rollouter:
-            try:
-                ray.get(self.components["rollouter"].bootstrap_pause.remote())
-            except Exception as e:
-                print(f"[EXCHANGE MAIN] bootstrap_pause failed/unsupported: {e}", flush=True)
-
         # Parameter sync setup
         # Optional: wrap rollouter.reset_staleness to emit on_param_update to exchange gate (ray/tcp backends).
         backend = str(getattr(getattr(config, "exchange", {}), "backend", "ray")).lower()
@@ -512,50 +504,27 @@ class FullyAsyncExchangeTaskRunner:
         side: Side = self.components["exchange_side"]
         mode: Mode = self.components["exchange_mode"]
 
-        # Scheduling policy (to match the intended bootstrap rhythm):
-        # - Side A: rollout first, then train (R -> T -> sync -> R ...)
-        # - Side B: train first, then rollout (T -> sync -> R ...)
-        #
-        # Notes:
-        # - We already perform an initial trainer->rollouter param sync in _initialize_components
-        #   via trainer._fit_update_weights().
-        # - Subsequent periodic synchronization is handled inside FullyAsyncTrainer.
+        # Both rollouter and trainer run as concurrent async Ray tasks.
+        # Side A submits rollouter first; Side B submits trainer first.
+        # The trainer naturally blocks on pull_grouped_sync() until the
+        # exchange server has a complete group, so ordering is cosmetic.
         futures = []
 
         if mode == "train_only":
             print(f"[EXCHANGE MAIN] Starting Trainer (side={side}, mode={mode}) ...")
             futures.append(self.components["trainer"].fit.remote())
             print("[EXCHANGE MAIN] Rollouter not started (train_only)")
-        elif mode == "both":
-            if side == "A":
-                print("[EXCHANGE MAIN] Starting Rollouter first (side=A, mode=both) ...")
-                futures.append(self.components["rollouter"].fit.remote())
-                print("[EXCHANGE MAIN] Starting Trainer (side=A, mode=both) ...")
-                futures.append(self.components["trainer"].fit.remote())
-            else:
-                print("[EXCHANGE MAIN] Starting Trainer first (side=B, mode=both) ...")
-                futures.append(self.components["trainer"].fit.remote())
-                print("[EXCHANGE MAIN] Starting Rollouter (side=B, mode=both) ...")
-                futures.append(self.components["rollouter"].fit.remote())
         else:
-            # train_first is equivalent to "start both, but in different order":
-            # - side A: rollout first
-            # - side B: train first (wait for first batch to complete before starting rollouter)
+            # both / train_first — identical behavior, just side-dependent submission order
             if side == "A":
-                print("[EXCHANGE MAIN] train_first (side=A): Starting Rollouter first ...")
+                print(f"[EXCHANGE MAIN] Starting Rollouter first (side=A, mode={mode}) ...")
                 futures.append(self.components["rollouter"].fit.remote())
-                print("[EXCHANGE MAIN] train_first (side=A): Starting Trainer ...")
+                print(f"[EXCHANGE MAIN] Starting Trainer (side=A, mode={mode}) ...")
                 futures.append(self.components["trainer"].fit.remote())
             else:
-                # B side: Start trainer, wait for it to complete one training step, then start rollouter
-                print("[EXCHANGE MAIN] train_first (side=B): Starting Trainer first (will wait for first batch) ...")
-                
-                # Start trainer in background
-                trainer_future = self.components["trainer"].fit.remote()
-                
-                # With bootstrap_pause, we can start rollouter immediately without risking early generation.
-                print("[EXCHANGE MAIN] train_first (side=B): Starting Rollouter ...")
-                futures.append(trainer_future)
+                print(f"[EXCHANGE MAIN] Starting Trainer first (side=B, mode={mode}) ...")
+                futures.append(self.components["trainer"].fit.remote())
+                print(f"[EXCHANGE MAIN] Starting Rollouter (side=B, mode={mode}) ...")
                 futures.append(self.components["rollouter"].fit.remote())
 
         try:
