@@ -233,18 +233,17 @@ class TcpExchangeServer:
 
                 # ── stats ─────────────────────────────────────────────
                 if op == "stats":
+                    side = str(req.get("side", "A")).upper()
                     async with st.cond:
                         total_pending = sum(len(v) for v in st.pending_for_a.values())
+                        my_ready = len(st.ready_for_a) if side == "A" else len(st.ready_for_b)
                         res = {
                             "pending_hashes_a": len(st.pending_for_a),
                             "pending_hashes_b": len(st.pending_for_b),
                             "total_pending_samples": total_pending,
                             "ready_for_a": len(st.ready_for_a),
                             "ready_for_b": len(st.ready_for_b),
-                            # queue_size only counts READY groups (consumed by trainer).
-                            # pending samples must NOT count: they haven't matched yet,
-                            # and pausing the rollouter would prevent matching → deadlock.
-                            "queue_size": (len(st.ready_for_a) + len(st.ready_for_b)) * EXPECTED_PER_HASH,
+                            "queue_size": my_ready * EXPECTED_PER_HASH,
                             **dict(st.stats),
                         }
                     await _send(writer, {"ok": True, "result": res, "error": None})
@@ -326,7 +325,7 @@ class TcpExchangeClient:
 
     def get_statistics_sync(self) -> dict[str, Any]:
         with socket.create_connection((self.host, self.port), timeout=10) as sock:
-            _send_sync(sock, {"op": "stats", "run_id": self.run_id})
+            _send_sync(sock, {"op": "stats", "run_id": self.run_id, "side": self.side})
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
                 raise RuntimeError(resp.get("error") or "stats failed")
