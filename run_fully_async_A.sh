@@ -5,7 +5,7 @@ set -x
 # Side A: 默认负责 rollout + train
 export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
 export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
 export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
@@ -20,11 +20,11 @@ export RAY_memory_usage_threshold=0.99
 
 
 adv_estimator="grpo"
-train_files="data/gsm8k/train.parquet"
-val_files="data/gsm8k/test.parquet"
-model_path="$(pwd)/Qwen3-1.7B"
-project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="0508a"
+train_files="data/math/train.parquet"
+val_files="data/math/test.parquet"
+model_path="${model_path:-$(pwd)/Qwen3-8B}"
+project_name="gapgrpo_qwen3_8b_MATH"
+experiment_name="4xa800_siteA"
 
 # 固定用同一个本机 Ray 集群（由 A 启动 head）
 RAY_BIN="${RAY_BIN:-}"
@@ -37,14 +37,14 @@ fi
 RAY_BIN="${RAY_BIN:-ray}"
 
 # A 独立机器
-CUDA_VISIBLE_DEVICES_A="${CUDA_VISIBLE_DEVICES_A:-0,1}"
+CUDA_VISIBLE_DEVICES_A="${CUDA_VISIBLE_DEVICES_A:-0,1,2,3}"
 RAY_TEMP_DIR_A="${RAY_TEMP_DIR_A:-/tmp/ray_a}"
 mkdir -p "$RAY_TEMP_DIR_A"
 
 # 先清理旧集群，再启动新的
 "$RAY_BIN" stop --force 2>/dev/null || true
 sleep 1
-CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_A" "$RAY_BIN" start --head --port=6379 --num-gpus=2 --temp-dir "$RAY_TEMP_DIR_A" --include-dashboard=false
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES_A" "$RAY_BIN" start --head --port=6379 --num-gpus=4 --temp-dir "$RAY_TEMP_DIR_A" --include-dashboard=false
 sleep 3
 
 rollout_mode="async"
@@ -84,7 +84,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     actor_rollout_ref.model.path=${model_path} \
     algorithm.adv_estimator=${adv_estimator} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.pipeline_model_parallel_size=1 \
     actor_rollout_ref.rollout.data_parallel_size=1 \
     actor_rollout_ref.hybrid_engine=False \
@@ -102,9 +102,9 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
     trainer.nnodes=1 \
-    trainer.n_gpus_per_node=1 \
+    trainer.n_gpus_per_node=2 \
     rollout.nnodes=1 \
-    rollout.n_gpus_per_node=1 \
+    rollout.n_gpus_per_node=2 \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     async_training.require_batches=${require_batches} \
     async_training.staleness_threshold="${staleness_threshold}" \
@@ -118,7 +118,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     +exchange.port="${EXCHANGE_PORT}" \
     +exchange.enable_group_merge=true \
     +exchange.expected_per_hash=2 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \

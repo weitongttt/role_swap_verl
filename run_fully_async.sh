@@ -14,11 +14,11 @@ rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
 
 adv_estimator="grpo"
-train_files="data/gsm8k/train.parquet"
-val_files="data/gsm8k/test.parquet"
-model_path="$(pwd)/Qwen3-1.7B"
-project_name="gapgrpo_synced_qwen3_1_7b_MATH"
-experiment_name="baseline_4gpu_2t2r_g4_0430"
+train_files="data/math/train.parquet"
+val_files="data/math/test.parquet"
+model_path="${model_path:-$(pwd)/Qwen3-8B}"
+project_name="gapgrpo_qwen3_8b_MATH"
+experiment_name="baseline_4xa800_g4"
 
 # 独立启动 baseline 的 Ray 集群 (避开 A/B 的 6379 和 6380 端口)
 RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
@@ -58,7 +58,7 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/yc/bin/python -m verl.exp
     actor_rollout_ref.model.path=${model_path} \
     algorithm.adv_estimator=${adv_estimator} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.pipeline_model_parallel_size=1 \
     actor_rollout_ref.rollout.data_parallel_size=1 \
     actor_rollout_ref.hybrid_engine=False \
@@ -84,7 +84,7 @@ PYTHONUNBUFFERED=1 /zhangshihao/weitong/anaconda3/envs/yc/bin/python -m verl.exp
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.partial_rollout="${partial_rollout}" \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.max_num_batched_tokens=${max_num_batched_tokens} \
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
