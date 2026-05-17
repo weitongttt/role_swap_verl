@@ -58,7 +58,7 @@ max_num_batched_tokens=$((max_response_length * 4))
 n_resp_per_prompt=4
 use_dynamic_bsz=true
 total_rollout_steps=$((400*1*160))
-mini_batch_size=320  # GAP-GRPO: 消耗 A 和 B 汇总的样本量 (160+160)
+mini_batch_size=128  # GAP-GRPO: A+B 汇总 (64+64)
 require_batches=1
 test_freq=1000
 

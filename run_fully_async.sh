@@ -38,7 +38,7 @@ max_num_batched_tokens=$((max_response_length * 4))  # max_response_length 的 4
 n_resp_per_prompt=4
 use_dynamic_bsz=true  # 动态batch size
 total_rollout_steps=$(((400*1*160)))
-mini_batch_size=160 # 为了做到绝对对齐实验，必须和 A 改成一模一样的 160
+mini_batch_size=128 # baseline single-cluster group_size=4
 require_batches=1
 test_freq=1000
 staleness_threshold=3
