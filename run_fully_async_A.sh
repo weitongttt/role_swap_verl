@@ -20,11 +20,11 @@ export RAY_memory_usage_threshold=0.99
 
 
 adv_estimator="grpo"
-train_files="data/math/train.parquet"
-val_files="data/math/test.parquet"
+train_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
 model_path="${model_path:-$(pwd)/Qwen3-8B}"
-project_name="gapgrpo_qwen3_8b_MATH"
-experiment_name="4xa800_siteA"
+project_name="gap_grpo_qwen3_8b_gsm8k"
+experiment_name="4xa800_siteA_0518"
 
 # 固定用同一个本机 Ray 集群（由 A 启动 head）
 RAY_BIN="${RAY_BIN:-}"
@@ -52,13 +52,13 @@ rollout_name="vllm"
 
 train_prompt_bsz=0
 gen_prompt_bsz=1
-max_model_len=8192
+max_model_len=4096
 max_response_length=4096
 max_num_batched_tokens=$((max_response_length * 4))
 n_resp_per_prompt=4
 use_dynamic_bsz=true
 total_rollout_steps=$((400*1*160))
-mini_batch_size=128  # GAP-GRPO: A+B 汇总 (64+64)
+mini_batch_size=320 # GAP-GRPO: A+B 汇总 (64+64)
 require_batches=1
 test_freq=1000
 
@@ -97,7 +97,7 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     trainer.val_before_train=False \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
-    trainer.save_freq=20 \
+    trainer.save_freq=50 \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.test_freq="${test_freq}" \
     trainer.logger='[console,swanlab]' \
