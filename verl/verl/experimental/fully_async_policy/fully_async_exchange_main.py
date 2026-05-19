@@ -18,8 +18,8 @@ Exchange-enabled variant of fully_async_main.
 - Keep original fully_async_main untouched.
 - Reuse FullyAsyncTrainer/FullyAsyncRollouter as-is.
 - Swap the MessageQueueClient with an adapter that routes samples through a
-  bidirectional exchange channel (A<->B).
-- Support bootstrap mode: side B can start as train-only to avoid deadlock.
+  TCP exchange server supporting N independent sites.
+- Support bootstrap mode: non-primary sites can start as train-only to avoid deadlock.
 """
 
 import asyncio
@@ -37,13 +37,11 @@ from omegaconf import OmegaConf
 
 from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
-from verl.experimental.fully_async_policy.message_queue import BidirectionalExchangeClient, BidirectionalExchangeQueue
 from verl.experimental.fully_async_policy.tcp_exchange import TcpExchangeClient
 from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.ppo.utils import Role
 from verl.utils.fs import copy_to_local
 
-Side = Literal["A", "B"]
 Mode = Literal["both", "train_only", "train_first"]
 
 
@@ -56,89 +54,6 @@ class ExchangeNames:
         return f"exchange_{self.run_id}"
 
 
-class ExchangeAsMessageQueueClient:
-    """
-    Adapter to satisfy the subset of MessageQueueClient API used by
-    FullyAsyncTrainer/FullyAsyncRollouter, but backed by BidirectionalExchangeQueue.
-    """
-
-    def __init__(self, exchange_client: Any, *, enable_gate: bool = False):
-        self.exchange_client = exchange_client
-        self.enable_gate = bool(enable_gate)
-
-    async def put_sample(self, sample: Any, prompt_hash: str = "") -> bool:
-        # Gate: only rollouter put is expected to call put_sample
-        if self.enable_gate and hasattr(self.exchange_client, "gate_wait_put_sync"):
-            self.exchange_client.gate_wait_put_sync()
-        return await self.exchange_client.send_to_peer(sample)
-
-    async def get_sample(self) -> Any | None:
-        # Trainer uses sync path today, but keep async for compatibility.
-        if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
-            self.exchange_client.gate_wait_get_sync()
-        res = await self.exchange_client.recv_from_peer()
-        return res[0] if isinstance(res, tuple) else res
-
-    def get_sample_sync(self) -> Any | None:
-        if self.enable_gate and hasattr(self.exchange_client, "gate_wait_get_sync"):
-            self.exchange_client.gate_wait_get_sync()
-        res = self.exchange_client.recv_from_peer_sync()
-        return res[0] if isinstance(res, tuple) else res
-
-    async def get_queue_size(self) -> int:
-        stats = self.get_statistics_sync()
-        # For side A: incoming is b_to_a_size; for side B: incoming is a_to_b_size.
-        return int(stats.get("incoming_size", 0))
-
-    async def get_statistics(self) -> dict[str, Any]:
-        return self.get_statistics_sync()
-
-    def get_statistics_sync(self) -> dict[str, Any]:
-        stats = self.exchange_client.get_statistics_sync()
-        if self.exchange_client.side == "A":
-            incoming = stats.get("b_to_a_size", 0)
-            outgoing = stats.get("a_to_b_size", 0)
-            produced = stats.get("a_to_b_produced", 0)
-            consumed = stats.get("a_to_b_consumed", 0)
-            dropped = stats.get("a_to_b_dropped", 0)
-        else:
-            incoming = stats.get("a_to_b_size", 0)
-            outgoing = stats.get("b_to_a_size", 0)
-            produced = stats.get("b_to_a_produced", 0)
-            consumed = stats.get("b_to_a_consumed", 0)
-            dropped = stats.get("b_to_a_dropped", 0)
-
-        # Compatibility shim:
-        # FullyAsyncRollouter expects "queue_size" to reflect the queue it is producing into,
-        # and uses it for pause/backpressure decisions.
-        compat = {
-            "incoming_size": incoming,
-            "outgoing_size": outgoing,
-            "queue_size": outgoing,
-            "total_produced": produced,
-            "total_consumed": consumed,
-            "dropped_samples": dropped,
-        }
-        return {**stats, **compat}
-
-    async def clear_queue(self):
-        # Exchange queue does not currently support clear; no-op for compatibility.
-        return None
-
-    async def shutdown(self):
-        return None
-
-    async def put_validate(self, data: Any) -> bool:
-        # Validation path isn't needed for exchange flow; keep it as no-op.
-        return True
-
-    def get_validate_sync(self) -> Any | None:
-        return None
-
-    async def get_memory_usage(self) -> dict:
-        return {}
-
-
 class GroupMergeMQClient:
     """Unified MQ client for hash-grouped TCP exchange (GAP-GRPO).
 
@@ -146,10 +61,10 @@ class GroupMergeMQClient:
     trainer (get_sample_sync → pull_grouped).
 
     The TCP server groups samples by prompt_hash.  When the server returns a
-    completed group (list of pickled samples from both sides), this client
+    completed group (list of pickled samples from all sites), this client
     buffers them and returns one at a time.  This ensures:
     - The trainer's required_samples count works correctly (1 call = 1 sample).
-    - Samples from both sides for the same prompt arrive in the same training
+    - Samples from all sites for the same prompt arrive in the same training
       batch (because they are buffered together and returned consecutively).
     """
 
@@ -285,10 +200,14 @@ class FullyAsyncExchangeTaskRunner:
         OmegaConf.resolve(config)
 
         exchange_cfg = getattr(config, "exchange", {})
-        side: Side = str(getattr(exchange_cfg, "side", "A")).upper()
+        # site_id: any non-empty string identifying this site (e.g. "0", "A", "beijing")
+        site_id = str(getattr(exchange_cfg, "side", "0"))
         mode: Mode = str(getattr(exchange_cfg, "mode", "both")).lower()  # type: ignore[assignment]
-        if side not in ("A", "B"):
-            raise ValueError(f"exchange.side must be A/B, got: {side}")
+        # site_index: integer index used for bootstrap ordering (0 = primary site)
+        site_index = int(getattr(exchange_cfg, "site_index", 0))
+
+        if not site_id:
+            raise ValueError(f"exchange.side must be a non-empty string, got: {site_id!r}")
         if mode not in ("both", "train_only", "train_first"):
             raise ValueError(f"exchange.mode must be both/train_only/train_first, got: {mode}")
 
@@ -296,7 +215,8 @@ class FullyAsyncExchangeTaskRunner:
         names = ExchangeNames(run_id=run_id)
 
         self.components["config"] = config
-        self.components["exchange_side"] = side
+        self.components["exchange_site_id"] = site_id
+        self.components["exchange_site_index"] = site_index
         self.components["exchange_mode"] = mode
         self.components["exchange_run_id"] = run_id
 
@@ -333,38 +253,25 @@ class FullyAsyncExchangeTaskRunner:
         print(f"[EXCHANGE MAIN] total_train_steps {total_train_steps}", flush=True)
         ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
 
-        # Create / reuse a detached exchange actor so A and B can connect to the same channel.
-        backend = str(getattr(exchange_cfg, "backend", "ray")).lower()
-        max_queue_size = int(getattr(exchange_cfg, "max_queue_size", 20000))
-        enable_gate = bool(getattr(exchange_cfg, "enable_gate", False))
-        if backend == "ray":
-            namespace = ray.get_runtime_context().namespace
-            try:
-                exchange_actor = ray.get_actor(names.exchange_actor, namespace=namespace)
-                print(f"[EXCHANGE MAIN] detected existing exchange actor: {names.exchange_actor} (ns={namespace})")
-            except Exception:
-                exchange_actor = BidirectionalExchangeQueue.options(
-                    name=names.exchange_actor, lifetime="detached", namespace=namespace
-                ).remote(max_queue_size=max_queue_size)
-                print(f"[EXCHANGE MAIN] created exchange actor: {names.exchange_actor} (ns={namespace})")
-
-            exchange_client = BidirectionalExchangeClient(exchange_actor, side=side)
-            mq_client = ExchangeAsMessageQueueClient(exchange_client, enable_gate=enable_gate)
-            self.components["exchange_actor"] = exchange_actor
-        elif backend == "tcp":
-            host = str(getattr(exchange_cfg, "host", "127.0.0.1"))
-            port = int(getattr(exchange_cfg, "port", 18080))
-            tcp_client = TcpExchangeClient(host=host, port=port, run_id=run_id, side=side)
-            # Single GroupMergeMQClient used by both rollouter (put_sample) and trainer (get_sample_sync)
-            mq_client = GroupMergeMQClient(tcp_client)
-            self.components["exchange_actor"] = None
-            print(
-                f"[EXCHANGE MAIN] TCP hash-grouped exchange: {host}:{port} "
-                f"run_id={run_id} side={side}",
-                flush=True,
+        # Create TCP exchange client (only TCP backend supported)
+        backend = str(getattr(exchange_cfg, "backend", "tcp")).lower()
+        if backend != "tcp":
+            raise ValueError(
+                f"exchange.backend must be 'tcp', got: {backend!r}. "
+                f"The legacy 'ray' backend has been removed."
             )
-        else:
-            raise ValueError(f"exchange.backend must be ray/tcp, got: {backend}")
+
+        host = str(getattr(exchange_cfg, "host", "127.0.0.1"))
+        port = int(getattr(exchange_cfg, "port", 18080))
+        tcp_client = TcpExchangeClient(host=host, port=port, run_id=run_id, site_id=site_id)
+        # Single GroupMergeMQClient used by both rollouter (put_sample) and trainer (get_sample_sync)
+        mq_client = GroupMergeMQClient(tcp_client)
+        self.components["exchange_actor"] = None
+        print(
+            f"[EXCHANGE MAIN] TCP hash-grouped exchange: {host}:{port} "
+            f"run_id={run_id} site_id={site_id} site_index={site_index}",
+            flush=True,
+        )
 
         self.components["message_queue_client"] = mq_client
 
@@ -377,11 +284,7 @@ class FullyAsyncExchangeTaskRunner:
         ray.get(self.components["rollouter"].load_checkpoint.remote())
 
         # Parameter sync setup
-        # Optional: wrap rollouter.reset_staleness to emit on_param_update to exchange gate (ray/tcp backends).
-        backend = str(getattr(getattr(config, "exchange", {}), "backend", "ray")).lower()
-        side: Side = self.components["exchange_side"]
-        run_id = self.components["exchange_run_id"]
-        enable_gate = bool(getattr(getattr(config, "exchange", {}), "enable_gate", False))
+        enable_gate = bool(getattr(exchange_cfg, "enable_gate", False))
 
         if enable_gate:
             @ray.remote(num_cpus=1)
@@ -390,27 +293,17 @@ class FullyAsyncExchangeTaskRunner:
                     self,
                     real,
                     *,
-                    backend: str,
-                    side: str,
+                    site_id: str,
                     run_id: str,
-                    exchange_actor: Any | None = None,
                     host: str = "127.0.0.1",
                     port: int = 18080,
                 ):
                     self.real = real
-                    self.backend = backend
-                    self.side = side
+                    self.site_id = site_id
                     self.run_id = run_id
-                    self.exchange_actor = exchange_actor
                     self.host = host
                     self.port = int(port)
-
-                    self._client = None
-                    if backend == "tcp":
-                        self._client = TcpExchangeClient(host=host, port=self.port, run_id=run_id, side=side)
-                    elif backend == "ray":
-                        if exchange_actor is not None:
-                            self._client = BidirectionalExchangeClient(exchange_actor, side=side)
+                    self._client = TcpExchangeClient(host=host, port=self.port, run_id=run_id, site_id=site_id)
 
                 def get_replicas(self):
                     return ray.get(self.real.get_replicas.remote())
@@ -423,7 +316,7 @@ class FullyAsyncExchangeTaskRunner:
 
                 def reset_staleness(self):
                     ret = ray.get(self.real.reset_staleness.remote())
-                    # Signal "this side just finished a parameter update" to flip gate phase.
+                    # Signal "this site just finished a parameter update" to flip gate phase.
                     try:
                         if self._client is not None and hasattr(self._client, "on_param_update_sync"):
                             self._client.on_param_update_sync()
@@ -431,31 +324,17 @@ class FullyAsyncExchangeTaskRunner:
                         print(f"[EXCHANGE MAIN] on_param_update failed: {e}", flush=True)
                     return ret
 
-            if backend == "tcp":
-                host = str(getattr(getattr(config, "exchange", {}), "host", "127.0.0.1"))
-                port = int(getattr(getattr(config, "exchange", {}), "port", 18080))
-                proxy = _RollouterProxy.remote(
-                    self.components["rollouter"],
-                    backend=backend,
-                    side=side,
-                    run_id=run_id,
-                    host=host,
-                    port=port,
-                )
-                ray.get(self.components["trainer"].set_rollouter.remote(proxy))
-            elif backend == "ray":
-                proxy = _RollouterProxy.remote(
-                    self.components["rollouter"],
-                    backend=backend,
-                    side=side,
-                    run_id=run_id,
-                    exchange_actor=self.components.get("exchange_actor"),
-                )
-                ray.get(self.components["trainer"].set_rollouter.remote(proxy))
-            else:
-                ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
+            proxy = _RollouterProxy.remote(
+                self.components["rollouter"],
+                site_id=site_id,
+                run_id=run_id,
+                host=host,
+                port=port,
+            )
+            ray.get(self.components["trainer"].set_rollouter.remote(proxy))
         else:
             ray.get(self.components["trainer"].set_rollouter.remote(self.components["rollouter"]))
+
         print("[EXCHANGE MAIN] Param sync before fit..", flush=True)
         ray.get(self.components["trainer"]._fit_update_weights.remote())
 
@@ -463,7 +342,8 @@ class FullyAsyncExchangeTaskRunner:
             ray.get(self.components["trainer"]._fit_validate.remote(True))
 
         print(
-            f"[EXCHANGE MAIN] initialized. side={side} mode={mode} run_id={run_id} exchange={names.exchange_actor}",
+            f"[EXCHANGE MAIN] initialized. site_id={site_id} site_index={site_index} "
+            f"mode={mode} run_id={run_id} exchange={names.exchange_actor}",
             flush=True,
         )
 
@@ -501,30 +381,32 @@ class FullyAsyncExchangeTaskRunner:
 
     def _run_training_loop(self):
         self.running = True
-        side: Side = self.components["exchange_side"]
+        site_id: str = self.components["exchange_site_id"]
+        site_index: int = self.components["exchange_site_index"]
         mode: Mode = self.components["exchange_mode"]
 
         # Both rollouter and trainer run as concurrent async Ray tasks.
-        # Side A submits rollouter first; Side B submits trainer first.
+        # Primary site (site_index=0) submits rollouter first to bootstrap.
+        # Non-primary sites submit trainer first.
         # The trainer naturally blocks on pull_grouped_sync() until the
         # exchange server has a complete group, so ordering is cosmetic.
         futures = []
 
         if mode == "train_only":
-            print(f"[EXCHANGE MAIN] Starting Trainer (side={side}, mode={mode}) ...")
+            print(f"[EXCHANGE MAIN] Starting Trainer (site={site_id}, mode={mode}) ...")
             futures.append(self.components["trainer"].fit.remote())
             print("[EXCHANGE MAIN] Rollouter not started (train_only)")
         else:
-            # both / train_first — identical behavior, just side-dependent submission order
-            if side == "A":
-                print(f"[EXCHANGE MAIN] Starting Rollouter first (side=A, mode={mode}) ...")
+            # both / train_first — use site_index for bootstrap ordering
+            if site_index == 0 or mode == "both":
+                print(f"[EXCHANGE MAIN] Starting Rollouter first (site={site_id}, index={site_index}, mode={mode}) ...")
                 futures.append(self.components["rollouter"].fit.remote())
-                print(f"[EXCHANGE MAIN] Starting Trainer (side=A, mode={mode}) ...")
+                print(f"[EXCHANGE MAIN] Starting Trainer (site={site_id}, mode={mode}) ...")
                 futures.append(self.components["trainer"].fit.remote())
             else:
-                print(f"[EXCHANGE MAIN] Starting Trainer first (side=B, mode={mode}) ...")
+                print(f"[EXCHANGE MAIN] Starting Trainer first (site={site_id}, index={site_index}, mode={mode}) ...")
                 futures.append(self.components["trainer"].fit.remote())
-                print(f"[EXCHANGE MAIN] Starting Rollouter (side=B, mode={mode}) ...")
+                print(f"[EXCHANGE MAIN] Starting Rollouter (site={site_id}, mode={mode}) ...")
                 futures.append(self.components["rollouter"].fit.remote())
 
         try:
@@ -572,4 +454,3 @@ def main(config):
 
 if __name__ == "__main__":
     main()
-

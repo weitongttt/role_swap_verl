@@ -7,6 +7,9 @@ export EXCHANGE_HOST=${EXCHANGE_HOST:-127.0.0.1}
 export EXCHANGE_PORT=${EXCHANGE_PORT:-18080}
 export EXCHANGE_MAX_QUEUE_SIZE=${EXCHANGE_MAX_QUEUE_SIZE:-20000}
 
+# Number of sites participating (default: 2 for backward compatibility)
+NUM_SITES=${NUM_SITES:-2}
+
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [ -z "$PYTHON_BIN" ] && [ -n "${CONDA_PREFIX:-}" ] && [ -x "${CONDA_PREFIX}/bin/python" ]; then
   PYTHON_BIN="${CONDA_PREFIX}/bin/python"
@@ -18,5 +21,5 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 $PYTHON_BIN -m verl.experimental.fully_async_policy.tcp_exchange_server_main \
   --host "$EXCHANGE_HOST" \
-  --port "$EXCHANGE_PORT"
-
+  --port "$EXCHANGE_PORT" \
+  --expected-per-hash "$NUM_SITES"

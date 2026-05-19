@@ -16,10 +16,10 @@
 Simplified TCP exchange channel for cross-cluster rollout merging (GAP-GRPO).
 
 Design:
-- 2 hash-grouped queues: one per trainer side (A and B).
-- Rollouter push: (prompt_hash, pickled_sample) → stored in BOTH pending dicts.
-- When a hash accumulates 2 samples → group moves to ready queue.
-- Trainer pull: pops from its ready queue (blocks if empty).
+- N hash-grouped ready queues: one per participating site.
+- Rollouter push: (prompt_hash, pickled_sample) → stored in ALL sites' pending dicts.
+- When a hash accumulates `expected_per_hash` samples → group moves to each site's ready queue.
+- Trainer pull: pops from its own ready queue (blocks if empty).
 - No alternating turns → no deadlock.
 
 Protocol (wire format):
@@ -90,28 +90,43 @@ def _send_sync(sock: socket.socket, obj: Any) -> None:
 
 # ─── Server state ──────────────────────────────────────────────────────────
 
-EXPECTED_PER_HASH = 2  # Always 2 sides (A + B), hardcoded.
+DEFAULT_EXPECTED_PER_HASH = 2
 
 
 @dataclass
 class _RunState:
-    # Hash-indexed pending groups: hash → [payload_bytes, ...]
-    pending_for_a: dict[str, list] = field(default_factory=dict)
-    pending_for_b: dict[str, list] = field(default_factory=dict)
-    # Ready groups (each item = list[payload_bytes], len == EXPECTED_PER_HASH)
-    ready_for_a: deque = field(default_factory=deque)
-    ready_for_b: deque = field(default_factory=deque)
+    expected_per_hash: int = DEFAULT_EXPECTED_PER_HASH
+    # Shared pending dict: prompt_hash → list of payload bytes (from all sites)
+    pending: dict[str, list] = field(default_factory=dict)
+    # Per-site ready queues: site_id → deque of completed groups (each group = list[payload_bytes])
+    ready: dict[str, deque] = field(default_factory=dict)
+    # Set of known site_ids
+    registered_sites: set[str] = field(default_factory=set)
     cond: asyncio.Condition = field(default=None)
     stats: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+
+    def ensure_site(self, site_id: str) -> None:
+        """Lazily register a site if not yet known."""
+        if site_id not in self.registered_sites:
+            self.registered_sites.add(site_id)
+            self.ready[site_id] = deque()
+            print(
+                f"[TCP_EXCHANGE] Registered site '{site_id}' "
+                f"(total sites: {len(self.registered_sites)}, "
+                f"expected_per_hash: {self.expected_per_hash})",
+                flush=True,
+            )
+
 
 
 # ─── Server ────────────────────────────────────────────────────────────────
 
 
 class TcpExchangeServer:
-    def __init__(self, *, host: str, port: int, **_kwargs):
+    def __init__(self, *, host: str, port: int, expected_per_hash: int = DEFAULT_EXPECTED_PER_HASH, **_kwargs):
         self.host = host
         self.port = port
+        self.expected_per_hash = expected_per_hash
         self._runs: dict[str, _RunState] = {}
         self._lock = asyncio.Lock()
 
@@ -121,7 +136,7 @@ class TcpExchangeServer:
             if st is not None:
                 return st
             cond = asyncio.Condition(asyncio.Lock())
-            st = _RunState(cond=cond)
+            st = _RunState(cond=cond, expected_per_hash=self.expected_per_hash)
             self._runs[run_id] = st
             return st
 
@@ -137,66 +152,66 @@ class TcpExchangeServer:
                 if op == "push_grouped":
                     prompt_hash = str(req.get("prompt_hash", ""))
                     payload = req.get("payload")
-                    side = str(req.get("side", "?"))
+                    site_id = str(req.get("side", "?"))
 
                     async with st.cond:
+                        # Auto-register the pushing site
+                        st.ensure_site(site_id)
+
                         if not prompt_hash:
                             # No hash → bypass grouping, put directly as single-sample group
-                            st.ready_for_a.append([payload])
-                            st.ready_for_b.append([payload])
+                            for sid in st.registered_sites:
+                                st.ready[sid].append([payload])
                             st.stats["passthrough"] += 1
                             print(
-                                f"[TCP_EXCHANGE] PUSH passthrough (no hash) side={side}",
+                                f"[TCP_EXCHANGE] PUSH passthrough (no hash) site={site_id}",
                                 flush=True,
                             )
                         else:
-                            # Add payload to BOTH pending dicts
-                            became_ready = False
-                            for pending, ready in [
-                                (st.pending_for_a, st.ready_for_a),
-                                (st.pending_for_b, st.ready_for_b),
-                            ]:
-                                if prompt_hash not in pending:
-                                    pending[prompt_hash] = []
-                                pending[prompt_hash].append(payload)
-                                if len(pending[prompt_hash]) >= EXPECTED_PER_HASH:
-                                    group = pending.pop(prompt_hash)
-                                    ready.append(group)
-                                    became_ready = True
+                            # Add payload to shared pending dict
+                            if prompt_hash not in st.pending:
+                                st.pending[prompt_hash] = []
+                            st.pending[prompt_hash].append(payload)
 
                             st.stats["pushes"] += 1
+                            became_ready = False
+
+                            if len(st.pending[prompt_hash]) >= st.expected_per_hash:
+                                # Group complete → move to ALL sites' ready queues
+                                group = st.pending.pop(prompt_hash)
+                                for sid in st.registered_sites:
+                                    st.ready[sid].append(group)
+                                became_ready = True
 
                             if became_ready:
                                 st.stats["groups_formed"] = st.stats.get("groups_formed", 0) + 1
+                                ready_summary = {sid: len(st.ready[sid]) for sid in st.registered_sites}
                                 print(
                                     f"[TCP_EXCHANGE] PUSH READY hash={prompt_hash[:8]} "
-                                    f"completed_by={side} "
-                                    f"ready_a={len(st.ready_for_a)} "
-                                    f"ready_b={len(st.ready_for_b)} "
-                                    f"pending_a={len(st.pending_for_a)} "
-                                    f"pending_b={len(st.pending_for_b)} "
+                                    f"completed_by={site_id} "
+                                    f"ready={ready_summary} "
+                                    f"pending_hashes={len(st.pending)} "
                                     f"total_groups={st.stats.get('groups_formed', 0)}",
                                     flush=True,
                                 )
                             else:
                                 # Only log every 20th pending push to reduce noise
                                 if st.stats["pushes"] % 20 == 0:
+                                    ready_summary = {sid: len(st.ready[sid]) for sid in st.registered_sites}
                                     print(
                                         f"[TCP_EXCHANGE] PUSH pending (summary) "
                                         f"total_pushes={st.stats['pushes']} "
-                                        f"pending_a={len(st.pending_for_a)} "
-                                        f"pending_b={len(st.pending_for_b)} "
-                                        f"ready_a={len(st.ready_for_a)} "
-                                        f"ready_b={len(st.ready_for_b)} "
+                                        f"pending_hashes={len(st.pending)} "
+                                        f"ready={ready_summary} "
                                         f"groups_formed={st.stats.get('groups_formed', 0)}",
                                         flush=True,
                                     )
 
                             # Warn if pending backlog is large
-                            if len(st.pending_for_a) > 50 and st.stats["pushes"] % 50 == 0:
+                            if len(st.pending) > 50 and st.stats["pushes"] % 50 == 0:
                                 print(
-                                    f"[TCP_EXCHANGE] WARNING pending_a={len(st.pending_for_a)} "
-                                    f"(no matching pushes from other side yet)",
+                                    f"[TCP_EXCHANGE] WARNING pending_hashes={len(st.pending)} "
+                                    f"(not all sites have pushed yet for these prompts)",
                                     flush=True,
                                 )
 
@@ -207,25 +222,30 @@ class TcpExchangeServer:
 
                 # ── pull_grouped ──────────────────────────────────────
                 if op == "pull_grouped":
-                    side = str(req.get("side", "A")).upper()
+                    site_id = str(req.get("side", "0"))
+
+                    async with st.cond:
+                        st.ensure_site(site_id)
+                        ready = st.ready[site_id]
+
                     print(
-                        f"[TCP_EXCHANGE] PULL request from side={side} "
-                        f"ready_{side.lower()}={len(st.ready_for_a if side == 'A' else st.ready_for_b)}",
+                        f"[TCP_EXCHANGE] PULL request from site={site_id} "
+                        f"ready={len(ready)}",
                         flush=True,
                     )
 
                     async with st.cond:
-                        ready = st.ready_for_a if side == "A" else st.ready_for_b
+                        ready = st.ready[site_id]
                         while len(ready) == 0:
                             await st.cond.wait()
                         group = ready.popleft()
-                        st.stats[f"consumed_{side.lower()}"] += 1
+                        st.stats[f"consumed_{site_id}"] += 1
 
                     print(
-                        f"[TCP_EXCHANGE] PULL delivered side={side} "
+                        f"[TCP_EXCHANGE] PULL delivered site={site_id} "
                         f"group_size={len(group)} "
                         f"remaining={len(ready)} "
-                        f"total_consumed_{side.lower()}={st.stats[f'consumed_{side.lower()}']}",
+                        f"total_consumed_{site_id}={st.stats[f'consumed_{site_id}']}",
                         flush=True,
                     )
                     await _send(writer, {"ok": True, "result": (group, len(ready)), "error": None})
@@ -233,17 +253,20 @@ class TcpExchangeServer:
 
                 # ── stats ─────────────────────────────────────────────
                 if op == "stats":
-                    side = str(req.get("side", "A")).upper()
+                    site_id = str(req.get("side", "0"))
                     async with st.cond:
-                        total_pending = sum(len(v) for v in st.pending_for_a.values())
-                        my_ready = len(st.ready_for_a) if side == "A" else len(st.ready_for_b)
+                        st.ensure_site(site_id)
+                        total_pending = sum(len(v) for v in st.pending.values())
+                        my_ready = len(st.ready[site_id])
+                        per_site_ready = {sid: len(st.ready[sid]) for sid in st.registered_sites}
                         res = {
-                            "pending_hashes_a": len(st.pending_for_a),
-                            "pending_hashes_b": len(st.pending_for_b),
+                            "registered_sites": list(st.registered_sites),
+                            "expected_per_hash": st.expected_per_hash,
+                            "per_site_ready": per_site_ready,
+                            "pending_hashes": len(st.pending),
                             "total_pending_samples": total_pending,
-                            "ready_for_a": len(st.ready_for_a),
-                            "ready_for_b": len(st.ready_for_b),
-                            "queue_size": my_ready * EXPECTED_PER_HASH,
+                            "my_ready": my_ready,
+                            "queue_size": my_ready * st.expected_per_hash,
                             **dict(st.stats),
                         }
                     await _send(writer, {"ok": True, "result": res, "error": None})
@@ -276,13 +299,13 @@ class TcpExchangeServer:
 
 
 class TcpExchangeClient:
-    def __init__(self, *, host: str, port: int, run_id: str, side: str):
-        if side not in ("A", "B"):
-            raise ValueError(f"side must be A/B, got: {side}")
+    def __init__(self, *, host: str, port: int, run_id: str, site_id: str):
+        if not site_id:
+            raise ValueError(f"site_id must be a non-empty string, got: {site_id!r}")
         self.host = host
         self.port = int(port)
         self.run_id = str(run_id)
-        self.side = side
+        self.site_id = str(site_id)
 
     # ── push (async, called by rollouter) ─────────────────────────────
 
@@ -294,7 +317,7 @@ class TcpExchangeClient:
                 "op": "push_grouped",
                 "run_id": self.run_id,
                 "prompt_hash": prompt_hash,
-                "side": self.side,
+                "side": self.site_id,
                 "payload": payload,
             })
             resp = await _recv(reader)
@@ -314,7 +337,7 @@ class TcpExchangeClient:
             _send_sync(sock, {
                 "op": "pull_grouped",
                 "run_id": self.run_id,
-                "side": self.side,
+                "side": self.site_id,
             })
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
@@ -325,7 +348,7 @@ class TcpExchangeClient:
 
     def get_statistics_sync(self) -> dict[str, Any]:
         with socket.create_connection((self.host, self.port), timeout=10) as sock:
-            _send_sync(sock, {"op": "stats", "run_id": self.run_id, "side": self.side})
+            _send_sync(sock, {"op": "stats", "run_id": self.run_id, "side": self.site_id})
             resp = _recv_sync(sock)
             if not resp.get("ok", False):
                 raise RuntimeError(resp.get("error") or "stats failed")
