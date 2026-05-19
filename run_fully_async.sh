@@ -14,11 +14,11 @@ rollout_mode="async"
 rollout_name="vllm" # sglang or vllm
 
 adv_estimator="grpo"
-train_files="data/math/train.parquet"
-val_files="data/math/test.parquet"
+train_files="data/gsm8k/train.parquet"
+val_files="data/gsm8k/test.parquet"
 model_path="${model_path:-$(pwd)/Qwen3-8B}"
-project_name="gapgrpo_qwen3_8b_MATH"
-experiment_name="baseline_4xa800_g4"
+project_name="gap_grpo_qwen3_8b_gsm8k"
+experiment_name="baseline_4xa800_g4_0518"
 
 # 独立启动 baseline 的 Ray 集群 (避开 A/B 的 6379 和 6380 端口)
 RAY_TEMP_DIR_BASE="/tmp/ray_baseline"
@@ -32,13 +32,13 @@ sleep 3
 # 训练参数
 train_prompt_bsz=0
 gen_prompt_bsz=1
-max_model_len=8192  # 模型最大上下文长度
+max_model_len=4096  # 模型最大上下文长度
 max_response_length=4096
 max_num_batched_tokens=$((max_response_length * 4))  # max_response_length 的 4-8 倍
 n_resp_per_prompt=4
 use_dynamic_bsz=true  # 动态batch size
 total_rollout_steps=$(((400*1*160)))
-mini_batch_size=128 # baseline single-cluster group_size=4
+mini_batch_size=320 # baseline single-cluster group_size=4
 require_batches=1
 test_freq=1000
 staleness_threshold=3
