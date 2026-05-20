@@ -520,6 +520,37 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             self.actor_rollout_wg.clear_cpu_model(self.local_trigger_step)
         return old_log_prob, old_log_prob_mfu
 
+    def _fit_update_actor(self, batch: DataProto) -> DataProto:
+        """Override to truncate batch to be divisible by effective mini_batch_size.
+
+        In async training with heterogeneous sites, the batch size from the
+        exchange queue is unpredictable. The parent's _update_actor multiplies
+        ppo_mini_batch_size by rollout.n, and the result must evenly divide
+        the batch. We truncate excess samples to guarantee divisibility.
+        """
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        effective_mbs = ppo_mini_batch_size * rollout_n
+        batch_size = len(batch)
+
+        if effective_mbs > 0 and batch_size % effective_mbs != 0:
+            truncated_size = (batch_size // effective_mbs) * effective_mbs
+            if truncated_size > 0:
+                dropped = batch_size - truncated_size
+                print(
+                    f"[FullyAsyncTrainer] Truncating batch from {batch_size} to {truncated_size} "
+                    f"(dropped {dropped} samples) to align with mini_batch_size={effective_mbs}"
+                )
+                batch = batch[:truncated_size]
+            else:
+                print(
+                    f"[FullyAsyncTrainer] WARNING: batch_size={batch_size} < effective_mbs={effective_mbs}, "
+                    f"skipping actor update"
+                )
+                return batch
+
+        return super()._fit_update_actor(batch)
+
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         print(
