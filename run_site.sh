@@ -44,6 +44,8 @@ adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
 model_path="${model_path:-$(pwd)/Qwen3-8B}"
+# Resolve relative paths to absolute (HuggingFace rejects ./ prefix)
+[[ "$model_path" == ./* ]] && model_path="$(pwd)/${model_path#./}"
 project_name="${PROJECT_NAME:-gap_grpo_qwen3_06b_gsm8k}"
 experiment_name="${EXPERIMENT_NAME:-site${SITE_INDEX}_${NUM_SITES}sites}"
 
