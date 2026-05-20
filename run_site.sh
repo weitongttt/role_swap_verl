@@ -28,7 +28,7 @@ SITE_INDEX="${SITE_INDEX:?Must set SITE_INDEX (e.g. 0, 1, 2)}"
 NUM_SITES="${NUM_SITES:?Must set NUM_SITES (e.g. 2, 3, 4)}"
 
 # ─── Environment ──────────────────────────────────────────────────────────
-export VERL_USE_MODELSCOPE=${VERL_USE_MODELSCOPE:-False}
+export VERL_USE_MODELSCOPE=True
 export HYDRA_CONFIG_PATH="$(pwd)/verl/verl/trainer/config"
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
