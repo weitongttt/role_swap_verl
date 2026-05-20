@@ -44,7 +44,7 @@ adv_estimator="grpo"
 train_files="data/gsm8k/train.parquet"
 val_files="data/gsm8k/test.parquet"
 model_path="${model_path:-$(pwd)/Qwen3-8B}"
-project_name="${PROJECT_NAME:-gap_grpo_qwen3_8b_gsm8k}"
+project_name="${PROJECT_NAME:-gap_grpo_qwen3_06b_gsm8k}"
 experiment_name="${EXPERIMENT_NAME:-site${SITE_INDEX}_${NUM_SITES}sites}"
 
 # ─── Ray cluster setup ───────────────────────────────────────────────────
@@ -57,14 +57,20 @@ if [ -z "$RAY_BIN" ] && command -v ray &>/dev/null; then
 fi
 RAY_BIN="${RAY_BIN:-ray}"
 
+RAY_PORT="${RAY_PORT:-6379}"
 RAY_TEMP_DIR="${RAY_TEMP_DIR:-/tmp/ray_site_${SITE_INDEX}}"
 mkdir -p "$RAY_TEMP_DIR"
 
-# Each site runs its own independent Ray cluster
-"$RAY_BIN" stop --force 2>/dev/null || true
-sleep 1
-CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$RAY_BIN" start --head --port=6379 --num-gpus=4 --temp-dir "$RAY_TEMP_DIR" --include-dashboard=false
+# Auto-detect GPU count from CUDA_VISIBLE_DEVICES
+IFS=',' read -ra _GPU_ARRAY <<< "$CUDA_VISIBLE_DEVICES"
+NUM_GPUS="${NUM_GPUS:-${#_GPU_ARRAY[@]}}"
+
+CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$RAY_BIN" start \
+  --head --port="$RAY_PORT" --num-gpus="$NUM_GPUS" \
+  --temp-dir "$RAY_TEMP_DIR" --include-dashboard=false
 sleep 3
+
+export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
 
 # ─── Rollout/training config ─────────────────────────────────────────────
 rollout_mode="async"
