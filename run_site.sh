@@ -64,9 +64,16 @@ mkdir -p "$RAY_TEMP_DIR"
 # Auto-detect GPU count from CUDA_VISIBLE_DEVICES
 IFS=',' read -ra _GPU_ARRAY <<< "$CUDA_VISIBLE_DEVICES"
 NUM_GPUS="${NUM_GPUS:-${#_GPU_ARRAY[@]}}"
+NUM_CPUS="${NUM_CPUS:-60}"
+
+# Worker port range: offset per site to avoid conflicts on shared machine
+RAY_PORT_OFFSET=$(( (RAY_PORT - 6379) * 10000 ))
+MIN_WORKER_PORT=${MIN_WORKER_PORT:-$(( 20000 + RAY_PORT_OFFSET ))}
+MAX_WORKER_PORT=${MAX_WORKER_PORT:-$(( MIN_WORKER_PORT + 9999 ))}
 
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$RAY_BIN" start \
-  --head --port="$RAY_PORT" --num-gpus="$NUM_GPUS" \
+  --head --port="$RAY_PORT" --num-gpus="$NUM_GPUS" --num-cpus="$NUM_CPUS" \
+  --min-worker-port="$MIN_WORKER_PORT" --max-worker-port="$MAX_WORKER_PORT" \
   --temp-dir "$RAY_TEMP_DIR" --include-dashboard=false
 sleep 3
 
