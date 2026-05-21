@@ -96,8 +96,8 @@ DEFAULT_EXPECTED_PER_HASH = 2
 @dataclass
 class _RunState:
     expected_per_hash: int = DEFAULT_EXPECTED_PER_HASH
-    # Shared pending dict: prompt_hash → list of payload bytes (from all sites)
-    pending: dict[str, list] = field(default_factory=dict)
+    # Shared pending dict: prompt_hash → {site_id: payload_bytes}  (one entry per site)
+    pending: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Per-site ready queues: site_id → deque of completed groups (each group = list[payload_bytes])
     ready: dict[str, deque] = field(default_factory=dict)
     # Set of known site_ids
@@ -168,17 +168,28 @@ class TcpExchangeServer:
                                 flush=True,
                             )
                         else:
-                            # Add payload to shared pending dict
+                            # Add payload to shared pending dict (keyed by site_id for dedup)
                             if prompt_hash not in st.pending:
-                                st.pending[prompt_hash] = []
-                            st.pending[prompt_hash].append(payload)
+                                st.pending[prompt_hash] = {}
+
+                            if site_id in st.pending[prompt_hash]:
+                                # Duplicate push from same site — replace with newer sample
+                                st.stats["duplicate_site_pushes"] = st.stats.get("duplicate_site_pushes", 0) + 1
+                                if st.stats["duplicate_site_pushes"] <= 10 or st.stats["duplicate_site_pushes"] % 100 == 0:
+                                    print(
+                                        f"[TCP_EXCHANGE] PUSH duplicate site={site_id} "
+                                        f"hash={prompt_hash[:8]} "
+                                        f"(replacing old, total_dupes={st.stats['duplicate_site_pushes']})",
+                                        flush=True,
+                                    )
+                            st.pending[prompt_hash][site_id] = payload
 
                             st.stats["pushes"] += 1
                             became_ready = False
 
                             if len(st.pending[prompt_hash]) >= st.expected_per_hash:
-                                # Group complete → move to ALL sites' ready queues
-                                group = st.pending.pop(prompt_hash)
+                                # Group complete (one payload per unique site) → move to ALL sites' ready queues
+                                group = list(st.pending.pop(prompt_hash).values())
                                 for sid in st.registered_sites:
                                     st.ready[sid].append(group)
                                 became_ready = True

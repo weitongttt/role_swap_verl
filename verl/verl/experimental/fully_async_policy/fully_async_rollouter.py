@@ -705,14 +705,14 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
         queue_stats = self.message_queue_client.get_statistics_sync()
         queue_size = queue_stats["queue_size"]
 
-        # Exchange cross-feed mode: staleness-based pausing can deadlock because this rollouter
-        # depends on *its own* trainer to reset staleness, while its trainer depends on the peer
-        # rollouter to provide samples. Default to pausing only on queue backpressure unless
-        # explicitly enabled.
+        # Exchange mode: with N independent sites (each has its own rollouter+trainer),
+        # staleness-based pausing is safe — each site's trainer pulls from the shared
+        # exchange server, so no circular dependency exists.  Default to True to prevent
+        # unbounded stale sample accumulation that kills training signal.
         exchange_cfg = getattr(self.config, "exchange", None)
         pause_on_staleness = True
         if exchange_cfg is not None:
-            pause_on_staleness = bool(getattr(exchange_cfg, "pause_on_staleness", False))
+            pause_on_staleness = bool(getattr(exchange_cfg, "pause_on_staleness", True))
 
         if queue_size >= self.max_queue_size:
             if not self.paused:
