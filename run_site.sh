@@ -101,6 +101,7 @@ staleness_threshold=${STALENESS_THRESHOLD:-3}
 trigger_parameter_sync_step=${TRIGGER_PARAMETER_SYNC_STEP:-1}
 partial_rollout=${PARTIAL_ROLLOUT:-false}
 actor_lr=${ACTOR_LR:-1e-6}
+ppo_epochs=${PPO_EPOCHS:-1}
 
 # ─── Exchange config ─────────────────────────────────────────────────────
 EXCHANGE_RUN_ID="${EXCHANGE_RUN_ID:-gapgrpo_run_001}"
@@ -181,5 +182,6 @@ PYTHONUNBUFFERED=1 python -m verl.experimental.fully_async_policy.fully_async_ex
     actor_rollout_ref.rollout.max_model_len=${max_model_len} \
     actor_rollout_ref.actor.fsdp_config.model_dtype="bfloat16" \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_batch_size} \
+    actor_rollout_ref.actor.ppo_epochs=${ppo_epochs} \
     actor_rollout_ref.actor.optim.lr=${actor_lr} \
     "$@"

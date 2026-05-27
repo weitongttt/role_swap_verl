@@ -544,15 +544,36 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         return batch
 
     def _fit_update_actor(self, batch: DataProto) -> DataProto:
-        """Filter batch to keep only local samples, then override to truncate batch 
-        to be divisible by effective mini_batch_size.
+        """Filter batch to keep only local samples for training,
+        but return the FULL batch for correct downstream logging/metrics.
         """
-        batch = self._filter_local_samples(batch)
+        local_batch = self._filter_local_samples(batch)
+        if local_batch is None or len(local_batch) == 0:
+            print(
+                f"[FullyAsyncTrainer] WARNING: no local samples after filtering, skipping actor update",
+                flush=True,
+            )
+            return batch
+
+        # Log advantage stats for the local subset (helps debug convergence)
+        if "advantages" in local_batch.batch:
+            advs = local_batch.batch["advantages"]
+            mask = local_batch.batch.get("response_mask", None)
+            if mask is not None:
+                masked_advs = advs[mask.bool()]
+                if masked_advs.numel() > 0:
+                    pos = (masked_advs > 0).float().mean().item()
+                    print(
+                        f"[FullyAsyncTrainer] Local advantages: "
+                        f"mean={masked_advs.mean().item():.4f} std={masked_advs.std().item():.4f} "
+                        f"pos_frac={pos:.3f} n_seq={len(local_batch)}",
+                        flush=True,
+                    )
 
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         rollout_n = self.config.actor_rollout_ref.rollout.n
         effective_mbs = ppo_mini_batch_size * rollout_n
-        batch_size = len(batch)
+        batch_size = len(local_batch)
 
         if effective_mbs > 0 and batch_size % effective_mbs != 0:
             truncated_size = (batch_size // effective_mbs) * effective_mbs
@@ -563,21 +584,19 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                     f"(dropped {dropped} samples) to align with mini_batch_size={effective_mbs}",
                     flush=True,
                 )
-                batch = batch[:truncated_size]
+                local_batch = local_batch[:truncated_size]
             else:
                 print(
                     f"[FullyAsyncTrainer] WARNING: batch_size={batch_size} < effective_mbs={effective_mbs}, "
                     f"skipping actor update",
                     flush=True,
                 )
-                return batch
+                return batch  # Return FULL batch
 
-        return super()._fit_update_actor(batch)
-
-    def _fit_update_critic(self, batch: DataProto) -> DataProto:
-        """Filter batch to keep only local samples, then update critic."""
-        batch = self._filter_local_samples(batch)
-        return super()._fit_update_critic(batch)
+        # Train on local-only batch
+        super()._fit_update_actor(local_batch)
+        # Return the FULL batch for downstream _fit_dump_data / _fit_collect_metrics
+        return batch
 
     def _fit_update_local_step(self):
         time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]

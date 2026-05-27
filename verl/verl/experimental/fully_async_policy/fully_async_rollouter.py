@@ -60,10 +60,9 @@ def _compute_prompt_hash(batch_dict) -> str:
         prompt_str = str(prompt)
         raw = prompt_str.encode("utf-8")
         h = hashlib.md5(raw).hexdigest()[:16]
-        print(
-            f"[prompt_hash] hash={h} prompt_len={len(prompt_str)} "
-            f"(hashing prompt text from dataloader)"
-        )
+        # print(
+        #     f"[prompt_hash] hash={h} prompt_len={len(prompt_str)} "
+        # )
         return h
     except Exception as exc:
         # Print available keys to diagnose further mismatches.
